@@ -1,0 +1,19 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.out
+
+# Local environment / secrets
+.env
+.env.local
+*.local
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+
+# Test / coverage output
+*.test
+coverage.out
