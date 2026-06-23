@@ -9,13 +9,19 @@ This is the first component of a larger project: the authentication and HTTP
 foundation. Domain features (GitHub data retrieval, persistence, and
 Zumble-Zay metadata) build on top of it.
 
+> **Project context & design:** [AGENTS.md](AGENTS.md) (canonical, tool-neutral
+> context), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the decision records in
+> [docs/adr/](docs/adr/), and a model-agnostic LLM
+> [design-review harness](docs/DESIGN_REVIEW.md).
+
 ## Features
 
 - **OAuth2 login** with Google, GitHub, and Microsoft (Azure AD).
 - **PKCE + state** on every login to defend against code interception and CSRF.
 - **Server-side sessions** with HMAC-signed, `HttpOnly`, `SameSite=Lax` cookies.
   Session fixation is prevented by rotating the session ID on login.
-- **Auth-gated routing** via `requireAuth` middleware for protected endpoints.
+- **Auth-gated routing** via a unified `RequireAuth`/`RequireScope` middleware
+  that resolves a principal from a session cookie or a workload bearer token.
 - **Security hardening**: strict security headers, allow-list CORS, request body
   size limits, request timeouts, panic recovery, and graceful shutdown.
 - **Zero third-party deps** beyond `golang.org/x/oauth2`.
@@ -27,6 +33,10 @@ cmd/server/          # main entrypoint
 internal/config/     # environment configuration
 internal/session/    # signed-cookie session manager
 internal/auth/       # OAuth provider wiring + login/callback handlers
+internal/authn/      # unified RequireAuth/RequireScope (cookie or bearer)
+internal/principal/  # Principal abstraction (user | workload)
+internal/worklist/   # WorkItem + ZZ metadata, store + sort + ingestion seam
+internal/api/        # JSON HTTP handlers
 internal/server/     # router + middleware
 ```
 
