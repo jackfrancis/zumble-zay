@@ -1,0 +1,13 @@
+# Build artifacts and local files not needed in the image build context.
+.git/
+bin/
+dist/
+*.md
+.env
+.env.*
+.vscode/
+.idea/
+.DS_Store
+deploy/
+Dockerfile
+.dockerignore

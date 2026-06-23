@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: zumble-zay
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: backend
+  # Annotations are ingress-controller specific; these target ingress-nginx +
+  # cert-manager. Adjust for your controller. Override host/secret per overlay.
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  tls:
+    - hosts:
+        - zumble-zay.example.com
+      secretName: zumble-zay-tls
+  rules:
+    - host: zumble-zay.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: zumble-zay
+                port:
+                  name: http

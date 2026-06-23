@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: zumble-zay
+
+# Note: secret.example.yaml is intentionally NOT listed here. Create the real
+# zumble-zay-secrets Secret out-of-band (see that file's header).
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: zumble-zay

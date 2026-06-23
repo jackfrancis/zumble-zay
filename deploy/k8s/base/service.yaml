@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: zumble-zay
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -32,6 +32,14 @@ internal/server/     # router + middleware
 
 ## Getting started
 
+There are two ways to run zumble-zay locally:
+
+- **On Kubernetes (recommended)** — mirrors how it runs in production; one
+  command: `make dev-up`. See [Develop on Kubernetes (kind)](#develop-on-kubernetes-kind).
+- **As a plain Go process** — the lightweight loop described below.
+
+### Run as a Go process
+
 1. Copy the environment template and fill in your values:
 
    ```sh
@@ -68,6 +76,7 @@ internal/server/     # router + middleware
 | GET    | `/auth/{provider}/callback`| no   | OAuth redirect target        |
 | POST   | `/auth/logout`             | no   | Destroy the current session  |
 | GET    | `/api/me`                  | yes  | Current authenticated user   |
+| GET    | `/api/worklist`            | yes  | Ordered set of work items    |
 
 Domain endpoints (GitHub data retrieval and Zumble-Zay metadata) are layered
 on this foundation as they are built.
@@ -79,6 +88,83 @@ make test   # run tests
 make vet    # static analysis
 make build  # compile to bin/server
 ```
+
+## Develop on Kubernetes (kind)
+
+The primary dev loop runs the app the same way it runs in production — in
+Kubernetes — using a local [kind](https://kind.sigs.k8s.io) cluster. A hardened
+container ([Dockerfile](Dockerfile), distroless/non-root/static) and kustomize
+manifests under [deploy/k8s](deploy/k8s) deploy the backend. The Dockerfile uses
+no BuildKit-only features, so it builds identically with Docker or Podman, and
+the `make` targets auto-detect the engine (Podman preferred on macOS, Docker
+otherwise — override with `CONTAINER_ENGINE=docker`).
+
+### Prerequisites
+
+- `kubectl`, `kind`, and a container engine (`podman` or `docker`).
+  On macOS: `brew install kind kubectl podman`.
+- With Podman, start the VM once: `podman machine start`.
+
+### Stand it up
+
+```sh
+make dev-up        # build image from source → create kind cluster →
+                   # load image → apply manifests → wait until ready
+make dev-forward   # port-forward the service to localhost:8080  (blocks)
+```
+
+Then, in another shell:
+
+```sh
+curl localhost:8080/healthz          # {"status":"ok"}
+curl localhost:8080/auth/providers   # enabled OAuth providers
+```
+
+`make dev-up` is idempotent — it auto-detects podman/docker, sets the kind
+podman provider when needed, and creates a random `SESSION_SECRET` only if the
+Secret does not already exist (so re-runs never rotate your session secret).
+
+### Iterate
+
+After editing source, re-run a single command to rebuild and redeploy:
+
+```sh
+make dev-up        # rebuilds the image, reloads it, re-applies, rolls out
+make dev-logs      # tail application logs
+```
+
+### Enable OAuth login (optional)
+
+The app starts without provider credentials (health and auth-listing endpoints
+work; login does not). To enable a provider, add its credentials to the Secret
+and restart the rollout:
+
+```sh
+kubectl -n zumble-zay create secret generic zumble-zay-secrets \
+  --from-literal=SESSION_SECRET="$(openssl rand -base64 48)" \
+  --from-literal=GITHUB_CLIENT_ID=... --from-literal=GITHUB_CLIENT_SECRET=... \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n zumble-zay rollout restart deploy/zumble-zay
+```
+
+Set each provider's OAuth redirect URI to `${BASE_URL}/auth/<provider>/callback`
+(for the dev overlay, `http://localhost:8080/auth/github/callback`).
+
+### Tear down
+
+```sh
+make dev-down      # delete the kind cluster
+```
+
+### Notes
+
+- State (sessions, worklist) is in-memory today, so the Deployment runs
+  `replicas: 1`. Horizontal scaling waits on a shared session store and the
+  cloud worklist store.
+- The dev overlay drops the public Ingress and serves over plain HTTP via
+  port-forward (`COOKIE_SECURE=false`). The `base` is production-shaped (TLS
+  Ingress, `COOKIE_SECURE=true`); override `BASE_URL`, the Ingress host, and the
+  TLS secret per environment.
 
 ## Roadmap
 

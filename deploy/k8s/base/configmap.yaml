@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zumble-zay-config
+data:
+  # Non-secret runtime configuration. Secrets live in the Secret (see
+  # secret.example.yaml). Override per-environment in an overlay.
+  ADDR: ":8080"
+  # Public URL used to build OAuth redirect URLs. MUST be the externally
+  # reachable HTTPS URL of the Ingress. Override per environment.
+  BASE_URL: "https://zumble-zay.example.com"
+  ALLOWED_ORIGINS: "https://zumble-zay.example.com"
+  # The Ingress terminates TLS, so the Secure cookie flag must be set.
+  COOKIE_SECURE: "true"
+  MICROSOFT_TENANT: "common"

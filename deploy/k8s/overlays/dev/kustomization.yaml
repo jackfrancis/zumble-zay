@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Dev overlay: local cluster, no public TLS ingress (use `kubectl port-forward`).
+resources:
+  - ../../base
+
+# Drop the public Ingress for local development.
+patches:
+  - target:
+      kind: Ingress
+      name: zumble-zay
+    patch: |
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: zumble-zay
+
+# Override config for local, non-TLS access via port-forward.
+configMapGenerator:
+  - name: zumble-zay-config
+    behavior: merge
+    literals:
+      - BASE_URL=http://localhost:8080
+      - ALLOWED_ORIGINS=http://localhost:8080
+      - COOKIE_SECURE=false
+
+images:
+  - name: zumble-zay
+    newName: localhost/zumble-zay
+    newTag: dev
