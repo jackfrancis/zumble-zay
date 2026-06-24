@@ -1,0 +1,145 @@
+// Package github is the GitHub provider client. It is imported only by agent
+// runtimes — never by ZZ core packages — because ZZ is a credential broker, not
+// a data broker: the agent connects to GitHub directly (see docs/adr/0006).
+//
+// It retrieves a user's pull requests via the search API using the user's own
+// vended token, so `@me` resolves to that user and public results need no extra
+// scope. Results map to worklist.WorkItem with default ZZ metadata; analysis
+// agents decorate priority/relevance/impact later.
+package github
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackfrancis/zumble-zay/internal/worklist"
+)
+
+const (
+	defaultBaseURL = "https://api.github.com"
+	perPage        = 50
+	maxBody        = 8 << 20 // 8 MiB
+)
+
+// Client retrieves work signals from GitHub.
+type Client struct {
+	http    *http.Client
+	baseURL string
+}
+
+// NewClient returns a GitHub client. A nil httpClient uses http.DefaultClient;
+// an empty baseURL uses the public API (tests point it at a stub).
+func NewClient(httpClient *http.Client, baseURL string) *Client {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
+	return &Client{http: httpClient, baseURL: strings.TrimRight(baseURL, "/")}
+}
+
+// signals are the (role, query) pairs retrieved for the authenticated user.
+// archived:false keeps stale archived-repo items out of the worklist.
+var signals = []struct{ role, query string }{
+	{"author", "is:pr is:open author:@me archived:false"},
+	{"assignee", "is:pr is:open assignee:@me archived:false"},
+	{"review-requested", "is:pr is:open review-requested:@me archived:false"},
+}
+
+// FetchWorklist retrieves the user's authored, assigned, and review-requested
+// pull requests and returns them deduplicated by item ID.
+func (c *Client) FetchWorklist(ctx context.Context, token string) ([]worklist.WorkItem, error) {
+	seen := make(map[string]worklist.WorkItem)
+	for _, s := range signals {
+		items, err := c.searchIssues(ctx, token, s.query)
+		if err != nil {
+			return nil, fmt.Errorf("github %s search: %w", s.role, err)
+		}
+		for _, it := range items {
+			if wi, ok := it.toWorkItem(); ok {
+				seen[wi.ID] = wi
+			}
+		}
+	}
+	out := make([]worklist.WorkItem, 0, len(seen))
+	for _, wi := range seen {
+		out = append(out, wi)
+	}
+	return out, nil
+}
+
+type searchResponse struct {
+	Items []searchItem `json:"items"`
+}
+
+type searchItem struct {
+	Number        int       `json:"number"`
+	Title         string    `json:"title"`
+	HTMLURL       string    `json:"html_url"`
+	State         string    `json:"state"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	RepositoryURL string    `json:"repository_url"`
+	PullRequest   *struct {
+		URL string `json:"url"`
+	} `json:"pull_request"`
+}
+
+func (it searchItem) toWorkItem() (worklist.WorkItem, bool) {
+	// Defensive: the search/issues endpoint can return issues; keep only PRs.
+	if it.PullRequest == nil {
+		return worklist.WorkItem{}, false
+	}
+	repo := strings.TrimPrefix(it.RepositoryURL, defaultBaseURL+"/repos/")
+	return worklist.WorkItem{
+		ID:     "github:" + repo + "#" + strconv.Itoa(it.Number),
+		Source: "github",
+		Type:   worklist.TypePullRequest,
+		GitHub: worklist.GitHubRef{
+			Number:    it.Number,
+			Repo:      repo,
+			Title:     it.Title,
+			URL:       it.HTMLURL,
+			State:     it.State,
+			UpdatedAt: it.UpdatedAt,
+		},
+		Meta: worklist.Metadata{Origin: worklist.OriginAgent},
+	}, true
+}
+
+func (c *Client) searchIssues(ctx context.Context, token, q string) ([]searchItem, error) {
+	u := c.baseURL + "/search/issues?per_page=" + strconv.Itoa(perPage) + "&q=" + url.QueryEscape(q)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "zumble-zay-agent")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var sr searchResponse
+	if err := json.Unmarshal(body, &sr); err != nil {
+		return nil, err
+	}
+	return sr.Items, nil
+}

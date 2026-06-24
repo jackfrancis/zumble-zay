@@ -33,3 +33,26 @@ func (s *MemoryStore) Seed(ownerID string, items ...WorkItem) {
 	defer s.mu.Unlock()
 	s.items[ownerID] = items
 }
+
+// Upsert adds or replaces an owner's items keyed by WorkItem.ID. Every item is
+// re-scoped to ownerID so an agent ingestion call cannot write across users.
+func (s *MemoryStore) Upsert(_ context.Context, ownerID string, items ...WorkItem) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing := s.items[ownerID]
+	index := make(map[string]int, len(existing))
+	for i, it := range existing {
+		index[it.ID] = i
+	}
+	for _, it := range items {
+		it.OwnerID = ownerID
+		if i, ok := index[it.ID]; ok {
+			existing[i] = it
+			continue
+		}
+		index[it.ID] = len(existing)
+		existing = append(existing, it)
+	}
+	s.items[ownerID] = existing
+	return nil
+}

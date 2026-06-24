@@ -28,3 +28,10 @@ and the token vault.
 - ZZ takes on signing-key management and rotation (a known, bounded cost).
 - If a mandated corporate IdP appears later, it can prove *workload identity*
   while ZZ still owns *authorization* — a hybrid, not a rewrite.
+
+## Amendment (2026-06-23)
+
+[ADR 0006](0006-credential-broker-not-data-broker.md) clarifies the *shape* of
+what ZZ issues: ZZ mints job tokens **and vends short-lived provider credentials**
+to runtimes on demand, but it does **not** proxy provider data. Agents connect to
+providers directly.

@@ -77,6 +77,10 @@ type WorkItem struct {
 // persistence backend will implement this without changing callers.
 type Store interface {
 	List(ctx context.Context, ownerID string) ([]WorkItem, error)
+	// Upsert adds or replaces an owner's items, keyed by WorkItem.ID. It is the
+	// write side used by agent ingestion; implementations scope every item to
+	// ownerID so an agent cannot write another user's data.
+	Upsert(ctx context.Context, ownerID string, items ...WorkItem) error
 }
 
 // Ingestor starts the serialized agentic flow that backfills a user's work

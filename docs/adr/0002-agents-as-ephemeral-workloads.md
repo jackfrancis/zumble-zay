@@ -35,3 +35,13 @@ alone.
   writes trace to runtime → job → user → signals.
 - Requires a runtime-type registry (capability templates) the mint check reads.
 - No need for full multi-tenant impersonation/OBO at request time.
+
+## Amendment (2026-06-23)
+
+- [ADR 0006](0006-credential-broker-not-data-broker.md): runtimes connect to
+  providers directly and **transiently hold** a ZZ-vended provider credential
+  for the duration of a job (the vault remains the *durable* holder). With the
+  first-slice OAuth App that credential is long-lived — a tracked limitation.
+- [ADR 0007](0007-orchestrator-colocated-until-spawn.md): the orchestrator is
+  co-located in the ZZ process until it gains real spawn privileges or ZZ scales
+  past `replicas: 1`.

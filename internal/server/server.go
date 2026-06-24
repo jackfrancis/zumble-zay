@@ -10,23 +10,44 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/auth"
 	"github.com/jackfrancis/zumble-zay/internal/authn"
 	"github.com/jackfrancis/zumble-zay/internal/config"
+	"github.com/jackfrancis/zumble-zay/internal/mint"
+	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 	"github.com/jackfrancis/zumble-zay/internal/principal"
 	"github.com/jackfrancis/zumble-zay/internal/session"
+	"github.com/jackfrancis/zumble-zay/internal/vault"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
-// New builds the fully wired HTTP handler for the application.
-func New(cfg *config.Config, log *slog.Logger) http.Handler {
-	sessions := session.NewManager(cfg.SessionSecret, cfg.CookieSecure)
-	authH := auth.NewHandler(cfg, sessions)
-	// No workload token validator yet; cookie sessions only until ZZ token
-	// issuance is built. The seam is ready for it.
-	authenticator := authn.New(sessions, nil)
+// New builds the fully wired HTTP handler for the application. The launcher is
+// the agent-runtime substrate (in-process today); it is injected so ZZ core
+// never imports a provider client (docs/adr/0006). The returned cleanup stops
+// the orchestrator's workers.
+func New(cfg *config.Config, log *slog.Logger, launcher orchestrator.Launcher) (http.Handler, func()) {
+	return newWithDeps(cfg, log, launcher, vault.NewMemoryVault(), worklist.NewMemoryStore())
+}
 
-	// Worklist domain. In-memory store + no-op ingestor for now; both are
-	// behind interfaces so the cloud store and the agentic backfill plug in
-	// without changing the handler.
-	worklistHandler := api.NewWorklistHandler(worklist.NewMemoryStore(), worklist.NoopIngestor{Log: log})
+// newWithDeps wires the handler over injected dependencies. Tests use it to
+// seed a vault credential and share the store; New supplies in-memory defaults.
+func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Launcher, vlt vault.Vault, store worklist.Store) (http.Handler, func()) {
+	sessions := session.NewManager(cfg.SessionSecret, cfg.CookieSecure)
+	// The auth handler writes delegated provider tokens to the vault at login;
+	// the credential-vend endpoint reads them for agent runtimes.
+	authH := auth.NewHandler(cfg, sessions, vlt)
+	// Minter issues and validates ZZ job tokens for agent runtimes; it is both
+	// the orchestrator's minter and authn's workload TokenValidator.
+	minter := mint.NewMinter(cfg.SessionSecret, 0)
+	authenticator := authn.New(sessions, minter)
+
+	// Co-located orchestrator: it implements worklist.Ingestor, so an empty
+	// worklist GET triggers an agentic backfill. It mints job tokens with the
+	// same minter authn validates (docs/adr/0007).
+	orch := orchestrator.New(minter, launcher, log)
+
+	// One store is shared by the read path (GET /api/worklist) and the agent
+	// write path (POST /agent/worklist).
+	worklistHandler := api.NewWorklistHandler(store, orch)
+	credentialHandler := api.NewCredentialHandler(vlt)
+	ingestHandler := api.NewIngestHandler(store)
 
 	mux := http.NewServeMux()
 
@@ -70,13 +91,19 @@ func New(cfg *config.Config, log *slog.Logger) http.Handler {
 	// Worklist: the ordered set of work for the landing page.
 	mux.Handle("GET /api/worklist", authenticator.RequireAuth(http.HandlerFunc(worklistHandler.List)))
 
+	// Agent plane (workload tokens only). Credential vend lets a runtime obtain
+	// the acting user's provider credential to call the provider directly;
+	// ingest is the runtime's output sink back into ZZ.
+	mux.Handle("POST /agent/credentials/{provider}", authenticator.RequireScope(principal.ScopeSignalsRead, http.HandlerFunc(credentialHandler.Vend)))
+	mux.Handle("POST /agent/worklist", authenticator.RequireScope(principal.ScopeMetadataWrite, http.HandlerFunc(ingestHandler.Ingest)))
+
 	// Global middleware chain (outermost first).
 	var h http.Handler = mux
 	h = cors(cfg.AllowedOrigins, h)
 	h = securityHeaders(h)
 	h = logRequests(log, h)
 	h = recoverer(log, h)
-	return h
+	return h, orch.Stop
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

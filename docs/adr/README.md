@@ -10,3 +10,5 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0003](0003-kubernetes-substrate.md) | Kubernetes is the runtime substrate | Accepted |
 | [0004](0004-render-reads-persisted-zz.md) | Landing page reads persisted ZZ data | Accepted |
 | [0005](0005-in-memory-first.md) | In-memory stores first, behind interfaces | Accepted |
+| [0006](0006-credential-broker-not-data-broker.md) | ZZ is a credential broker, not a data broker | Accepted |
+| [0007](0007-orchestrator-colocated-until-spawn.md) | Orchestrator co-located until it spawns real workloads | Accepted |

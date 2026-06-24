@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackfrancis/zumble-zay/internal/config"
 	"github.com/jackfrancis/zumble-zay/internal/session"
+	"github.com/jackfrancis/zumble-zay/internal/vault"
 )
 
 // provider describes how to authenticate with a single identity provider and
@@ -36,15 +37,19 @@ type Handler struct {
 	sessions  *session.Manager
 	providers map[string]*provider
 	client    *http.Client
+	vault     vault.Vault
 }
 
 // NewHandler builds the auth handler from configuration. Only providers with
-// credentials configured are registered.
-func NewHandler(cfg *config.Config, sessions *session.Manager) *Handler {
+// credentials configured are registered. The vault retains each user's
+// delegated provider token so agent runtimes can later be vended a credential
+// to act on their behalf (ADR 0006).
+func NewHandler(cfg *config.Config, sessions *session.Manager, vlt vault.Vault) *Handler {
 	h := &Handler{
 		sessions:  sessions,
 		providers: make(map[string]*provider),
 		client:    &http.Client{Timeout: 10 * time.Second},
+		vault:     vlt,
 	}
 
 	redirect := func(name string) string {
@@ -211,6 +216,19 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "invalid user profile", http.StatusBadGateway)
 		return
+	}
+
+	// Retain the delegated provider token in the vault so agent runtimes can be
+	// vended a credential to act on the user's behalf (ADR 0006). Best-effort:
+	// a vault failure must not block interactive login.
+	if h.vault != nil {
+		_ = h.vault.Put(ctx, user.ID, vault.Credential{
+			Provider:     p.name,
+			AccessToken:  token.AccessToken,
+			RefreshToken: token.RefreshToken,
+			TokenType:    token.TokenType,
+			Expiry:       token.Expiry,
+		})
 	}
 
 	h.sessions.Authenticate(w, r, user)

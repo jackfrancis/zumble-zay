@@ -18,8 +18,8 @@ flowchart TB
     SESS[session: HMAC cookie sessions]
     WL[worklist: Store + sort]
     ING[Ingestor seam]
-    VAULT[(token vault - planned)]
-    MINT[token mint / RFC 8693 - planned]
+    VAULT[(token vault)]
+    MINT[token mint / RFC 8693]
     STORE[(persisted worklist - planned)]
   end
 
@@ -39,9 +39,9 @@ flowchart TB
   ORCH -->|client-secret / SA-OIDC| MINT
   MINT -->|scoped token| RT
   RT -->|bearer| AUTHN
-  RT --> VAULT
-  VAULT --> GH
-  VAULT --> GRAPH
+  RT -->|vend credential| VAULT
+  RT -->|connect directly| GH
+  RT -->|connect directly| GRAPH
   RT -->|write metadata| STORE
 ```
 
@@ -79,15 +79,18 @@ flowchart LR
   U[User consent in ZZ] --> V[(Vault: delegated provider tokens)]
   O[Orchestrator] -->|token exchange| M[ZZ mint]
   M -->|job-scoped, short-lived token| R[Ephemeral runtime]
-  R -->|signals:read via ZZ| V
+  R -->|vend credential| V
+  R -->|connect directly| GH[(GitHub / Graph)]
   R -->|metadata:write| S[(Persisted worklist)]
 ```
 
 - The orchestrator (durable identity) requests a credential for each spawned
   runtime. ZZ mints `orchestrator authority ∩ user consent ∩ runtime policy`
   as a short-lived, self-describing token.
-- Runtimes never hold raw provider tokens; ZZ's vault does, and reads are
-  brokered through ZZ-normalized signal endpoints.
+- Runtimes **connect to providers directly** using a short-lived credential
+  **vended by ZZ on demand** from the vault; ZZ never proxies provider data
+  (ADR 0006). The vault is the durable holder — a runtime holds the credential
+  only for its job.
 
 ## Data model (worklist)
 
