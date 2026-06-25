@@ -66,6 +66,11 @@ Separate **observed signals (facts)** from **computed scores (judgments)**.
   on a refresh tick, not frozen at ingest.** Computing `CommentAccel` and decay
   requires retaining a **prior `Signals` snapshot** per item, so the store gains
   a history obligation it did not have before.
+  - *Realized:* `Score` is a pure function of persisted `Signals` plus a clock,
+    and the worklist read path re-evaluates it against `now` on every `GET`
+    (human overrides excepted). This is core read-model logic, computed
+    synchronously in ZZ — never delegated to an agent. The snapshot-dependent
+    part (`CommentAccel`) remains deferred.
 - **Relatedness is a cross-item pass.** `RelatedActive` needs the user's whole
   active set in scope, so it runs after the per-item fetch, not inside it.
 - Soft signals (`TrendScore`, `DiffuseInterest`) are probabilistic and arrive on

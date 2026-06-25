@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/principal"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
@@ -14,11 +15,12 @@ import (
 type WorklistHandler struct {
 	store    worklist.Store
 	ingestor worklist.Ingestor
+	now      func() time.Time // injectable clock for read-time rescoring
 }
 
 // NewWorklistHandler constructs a WorklistHandler.
 func NewWorklistHandler(store worklist.Store, ingestor worklist.Ingestor) *WorklistHandler {
-	return &WorklistHandler{store: store, ingestor: ingestor}
+	return &WorklistHandler{store: store, ingestor: ingestor, now: time.Now}
 }
 
 // worklistResponse is the envelope returned by List.
@@ -77,6 +79,21 @@ func (h *WorklistHandler) List(w http.ResponseWriter, r *http.Request) {
 			Items:  []worklist.WorkItem{},
 		})
 		return
+	}
+
+	// Time-dependent axes (urgency, engagement) decay with the clock, so
+	// evaluate each item's score against now at read time rather than trusting
+	// the value frozen at ingest (docs/adr/0008). This is pure evaluation of
+	// persisted ZZ data — core read-model logic, never an agent's job. Human
+	// overrides (OriginUser) are preserved verbatim.
+	now := h.now()
+	for i := range items {
+		if items[i].Meta.Origin == worklist.OriginUser {
+			continue
+		}
+		scored := worklist.Score(items[i], now)
+		scored.UpdatedAt = items[i].Meta.UpdatedAt // preserve persisted write time
+		items[i].Meta = scored
 	}
 
 	if err := worklist.Sort(items, key, desc); err != nil {

@@ -70,10 +70,12 @@ func TestWorklistEmptyTriggersIngestion(t *testing.T) {
 func TestWorklistReadyAndOrdered(t *testing.T) {
 	now := time.Now()
 	store := worklist.NewMemoryStore()
+	// User-set metadata is preserved verbatim by the read path (not rescored),
+	// so these explicit ranks drive the ordering assertion.
 	store.Seed("u1",
-		worklist.WorkItem{ID: "a", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.2}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
-		worklist.WorkItem{ID: "b", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.9}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
-		worklist.WorkItem{ID: "c", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.5}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
+		worklist.WorkItem{ID: "a", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.2, Origin: worklist.OriginUser}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
+		worklist.WorkItem{ID: "b", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.9, Origin: worklist.OriginUser}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
+		worklist.WorkItem{ID: "c", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.5, Origin: worklist.OriginUser}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
 	)
 	ing := &fakeIngestor{}
 	h := NewWorklistHandler(store, ing)
@@ -113,9 +115,10 @@ func TestWorklistInvalidSort(t *testing.T) {
 func TestWorklistAscOrder(t *testing.T) {
 	now := time.Now()
 	store := worklist.NewMemoryStore()
+	// User-set ranks are preserved by the read path, so they drive ordering.
 	store.Seed("u1",
-		worklist.WorkItem{ID: "a", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.2}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
-		worklist.WorkItem{ID: "b", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.9}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
+		worklist.WorkItem{ID: "a", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.2, Origin: worklist.OriginUser}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
+		worklist.WorkItem{ID: "b", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.9, Origin: worklist.OriginUser}, GitHub: worklist.GitHubRef{UpdatedAt: now}},
 	)
 	h := NewWorklistHandler(store, &fakeIngestor{})
 
@@ -125,5 +128,40 @@ func TestWorklistAscOrder(t *testing.T) {
 	resp := decode(t, rec.Body.Bytes())
 	if resp.Order != "asc" || resp.Items[0].ID != "a" {
 		t.Fatalf("asc order wrong: order=%q first=%q", resp.Order, resp.Items[0].ID)
+	}
+}
+
+func TestWorklistRescoresFromSignalsAtReadTime(t *testing.T) {
+	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+	store := worklist.NewMemoryStore()
+	// Stored agent-derived, with populated Signals but stale/zero Meta: the read
+	// path must derive the score from Signals as of the current clock.
+	store.Seed("u1", worklist.WorkItem{
+		ID: "pr1", OwnerID: "u1",
+		Signals: worklist.Signals{
+			Reasons:    []worklist.Reason{worklist.ReasonReviewRequested},
+			DeadlineAt: base.Add(20 * 24 * time.Hour),
+		},
+		Meta:   worklist.Metadata{Origin: worklist.OriginAgent},
+		GitHub: worklist.GitHubRef{UpdatedAt: base},
+	})
+	h := NewWorklistHandler(store, &fakeIngestor{})
+
+	// Read "now": the stale zero rank must be replaced by a real score.
+	h.now = func() time.Time { return base }
+	rec := httptest.NewRecorder()
+	h.List(rec, authedRequest("/api/worklist", "u1"))
+	early := decode(t, rec.Body.Bytes()).Items[0].Meta
+	if early.Rank == 0 {
+		t.Fatalf("read-time rescore should populate rank, got 0")
+	}
+
+	// Read again with the deadline imminent: urgency (and rank) must rise.
+	h.now = func() time.Time { return base.Add(19 * 24 * time.Hour) }
+	rec = httptest.NewRecorder()
+	h.List(rec, authedRequest("/api/worklist", "u1"))
+	late := decode(t, rec.Body.Bytes()).Items[0].Meta
+	if late.Urgency <= early.Urgency {
+		t.Fatalf("urgency should rise as the deadline approaches: early=%v late=%v", early.Urgency, late.Urgency)
 	}
 }
