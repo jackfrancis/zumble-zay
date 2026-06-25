@@ -12,3 +12,5 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0005](0005-in-memory-first.md) | In-memory stores first, behind interfaces | Accepted |
 | [0006](0006-credential-broker-not-data-broker.md) | ZZ is a credential broker, not a data broker | Accepted |
 | [0007](0007-orchestrator-colocated-until-spawn.md) | Orchestrator co-located until it spawns real workloads | Accepted |
+| [0008](0008-worklist-ranking-signals-vs-scores.md) | Worklist ranking separates observed signals from computed scores | Accepted |
+| [0009](0009-agent-runtime-contract-boundary.md) | The agent runtime contract is the substrate-neutral boundary | Accepted |

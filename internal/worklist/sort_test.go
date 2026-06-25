@@ -105,7 +105,7 @@ func TestSortKeyValidAndDiscovery(t *testing.T) {
 		t.Fatal("Valid() returned wrong result")
 	}
 	keys := SortKeys()
-	if len(keys) != 5 {
-		t.Fatalf("expected 5 registered sort keys, got %d (%v)", len(keys), keys)
+	if len(keys) != 7 {
+		t.Fatalf("expected 7 registered sort keys, got %d (%v)", len(keys), keys)
 	}
 }

@@ -11,11 +11,13 @@ import (
 type SortKey string
 
 const (
-	SortRank      SortKey = "rank"
-	SortPriority  SortKey = "priority"
-	SortImpact    SortKey = "impact"
-	SortRelevance SortKey = "relevance"
-	SortUpdated   SortKey = "updated"
+	SortRank       SortKey = "rank"
+	SortPriority   SortKey = "priority"
+	SortImpact     SortKey = "impact"
+	SortRelevance  SortKey = "relevance"
+	SortEngagement SortKey = "engagement"
+	SortUrgency    SortKey = "urgency"
+	SortUpdated    SortKey = "updated"
 )
 
 // DefaultSort is applied when no sort is requested.
@@ -27,9 +29,11 @@ var ErrUnknownSort = errors.New("unknown sort key")
 // comparators order items ascending by the chosen field; Sort applies the
 // requested direction. To add a sort, register it here.
 var comparators = map[SortKey]func(a, b WorkItem) int{
-	SortRank:      func(a, b WorkItem) int { return cmp.Compare(a.Meta.Rank, b.Meta.Rank) },
-	SortImpact:    func(a, b WorkItem) int { return cmp.Compare(a.Meta.Impact, b.Meta.Impact) },
-	SortRelevance: func(a, b WorkItem) int { return cmp.Compare(a.Meta.Relevance, b.Meta.Relevance) },
+	SortRank:       func(a, b WorkItem) int { return cmp.Compare(a.Meta.Rank, b.Meta.Rank) },
+	SortImpact:     func(a, b WorkItem) int { return cmp.Compare(a.Meta.Impact, b.Meta.Impact) },
+	SortRelevance:  func(a, b WorkItem) int { return cmp.Compare(a.Meta.Relevance, b.Meta.Relevance) },
+	SortEngagement: func(a, b WorkItem) int { return cmp.Compare(a.Meta.Engagement, b.Meta.Engagement) },
+	SortUrgency:    func(a, b WorkItem) int { return cmp.Compare(a.Meta.Urgency, b.Meta.Urgency) },
 	SortPriority: func(a, b WorkItem) int {
 		return cmp.Compare(priorityWeight(a.Meta.Priority), priorityWeight(b.Meta.Priority))
 	},
