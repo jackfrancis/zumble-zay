@@ -11,17 +11,12 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/github"
-	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
 // RunParams configures a single runtime invocation.
@@ -35,12 +30,15 @@ type RunParams struct {
 
 // Run executes the ingestion job: vend the provider credential from ZZ, fetch
 // the user's work directly from GitHub, then post it to ZZ's ingest sink. An
-// empty result is a successful no-op.
+// empty result is a successful no-op. The ZZ calls go through ZZClient, the
+// substrate-neutral runtime contract (docs/adr/0009).
 func Run(ctx context.Context, p RunParams) error {
 	if p.Client == nil {
 		p.Client = &http.Client{Timeout: 30 * time.Second}
 	}
-	cred, err := vendCredential(ctx, p)
+	zz := NewZZClient(p.BaseURL, p.Token, p.Client)
+
+	cred, err := zz.VendCredential(ctx, p.Provider)
 	if err != nil {
 		return fmt.Errorf("vend credential: %w", err)
 	}
@@ -51,66 +49,8 @@ func Run(ctx context.Context, p RunParams) error {
 	if len(items) == 0 {
 		return nil
 	}
-	if err := ingest(ctx, p, items); err != nil {
+	if err := zz.Ingest(ctx, items); err != nil {
 		return fmt.Errorf("ingest: %w", err)
-	}
-	return nil
-}
-
-type vendedCredential struct {
-	Provider    string `json:"provider"`
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	Expiry      string `json:"expiry"`
-}
-
-func vendCredential(ctx context.Context, p RunParams) (vendedCredential, error) {
-	u := strings.TrimRight(p.BaseURL, "/") + "/agent/credentials/" + p.Provider
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
-	if err != nil {
-		return vendedCredential{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.Token)
-
-	resp, err := p.Client.Do(req)
-	if err != nil {
-		return vendedCredential{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return vendedCredential{}, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	var c vendedCredential
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&c); err != nil {
-		return vendedCredential{}, err
-	}
-	if c.AccessToken == "" {
-		return vendedCredential{}, fmt.Errorf("empty access token")
-	}
-	return c, nil
-}
-
-func ingest(ctx context.Context, p RunParams, items []worklist.WorkItem) error {
-	body, err := json.Marshal(map[string]any{"items": items})
-	if err != nil {
-		return err
-	}
-	u := strings.TrimRight(p.BaseURL, "/") + "/agent/worklist"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.Token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
 }
