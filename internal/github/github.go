@@ -46,27 +46,40 @@ func NewClient(httpClient *http.Client, baseURL string) *Client {
 	return &Client{http: httpClient, baseURL: strings.TrimRight(baseURL, "/")}
 }
 
-// signals are the (role, query) pairs retrieved for the authenticated user.
+// signals are the (reason, query) pairs retrieved for the authenticated user.
+// The reason records why an item surfaced and feeds the Relevance/Urgency axes;
 // archived:false keeps stale archived-repo items out of the worklist.
-var signals = []struct{ role, query string }{
-	{"author", "is:pr is:open author:@me archived:false"},
-	{"assignee", "is:pr is:open assignee:@me archived:false"},
-	{"review-requested", "is:pr is:open review-requested:@me archived:false"},
+var signals = []struct {
+	reason worklist.Reason
+	query  string
+}{
+	{worklist.ReasonAuthor, "is:pr is:open author:@me archived:false"},
+	{worklist.ReasonAssignee, "is:pr is:open assignee:@me archived:false"},
+	{worklist.ReasonReviewRequested, "is:pr is:open review-requested:@me archived:false"},
 }
 
 // FetchWorklist retrieves the user's authored, assigned, and review-requested
-// pull requests and returns them deduplicated by item ID.
+// pull requests and returns them deduplicated by item ID. When an item surfaces
+// under more than one query, the reasons are merged onto a single work item.
 func (c *Client) FetchWorklist(ctx context.Context, token string) ([]worklist.WorkItem, error) {
+	now := time.Now().UTC()
 	seen := make(map[string]worklist.WorkItem)
 	for _, s := range signals {
 		items, err := c.searchIssues(ctx, token, s.query)
 		if err != nil {
-			return nil, fmt.Errorf("github %s search: %w", s.role, err)
+			return nil, fmt.Errorf("github %s search: %w", s.reason, err)
 		}
 		for _, it := range items {
-			if wi, ok := it.toWorkItem(); ok {
-				seen[wi.ID] = wi
+			wi, ok := it.toWorkItem(s.reason, now)
+			if !ok {
+				continue
 			}
+			if existing, dup := seen[wi.ID]; dup {
+				existing.Signals.Reasons = appendReason(existing.Signals.Reasons, s.reason)
+				seen[wi.ID] = existing
+				continue
+			}
+			seen[wi.ID] = wi
 		}
 	}
 	out := make([]worklist.WorkItem, 0, len(seen))
@@ -74,6 +87,17 @@ func (c *Client) FetchWorklist(ctx context.Context, token string) ([]worklist.Wo
 		out = append(out, wi)
 	}
 	return out, nil
+}
+
+// appendReason adds r to rs if not already present, keeping reasons unique and
+// in first-seen order.
+func appendReason(rs []worklist.Reason, r worklist.Reason) []worklist.Reason {
+	for _, x := range rs {
+		if x == r {
+			return rs
+		}
+	}
+	return append(rs, r)
 }
 
 type searchResponse struct {
@@ -85,19 +109,49 @@ type searchItem struct {
 	Title         string    `json:"title"`
 	HTMLURL       string    `json:"html_url"`
 	State         string    `json:"state"`
+	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	Comments      int       `json:"comments"`
 	RepositoryURL string    `json:"repository_url"`
-	PullRequest   *struct {
+	Labels        []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	Milestone *struct {
+		DueOn time.Time `json:"due_on"`
+	} `json:"milestone"`
+	Reactions *struct {
+		TotalCount int `json:"total_count"`
+	} `json:"reactions"`
+	PullRequest *struct {
 		URL string `json:"url"`
 	} `json:"pull_request"`
 }
 
-func (it searchItem) toWorkItem() (worklist.WorkItem, bool) {
+func (it searchItem) toWorkItem(reason worklist.Reason, now time.Time) (worklist.WorkItem, bool) {
 	// Defensive: the search/issues endpoint can return issues; keep only PRs.
 	if it.PullRequest == nil {
 		return worklist.WorkItem{}, false
 	}
 	repo := strings.TrimPrefix(it.RepositoryURL, defaultBaseURL+"/repos/")
+
+	// Signals carried directly by the search response — no extra API calls.
+	sig := worklist.Signals{
+		Reasons:        []worklist.Reason{reason},
+		Comments:       it.Comments,
+		OpenedAt:       it.CreatedAt,
+		LastActivityAt: it.UpdatedAt,
+		ObservedAt:     now,
+	}
+	if it.Reactions != nil {
+		sig.Reactions = it.Reactions.TotalCount
+	}
+	if it.Milestone != nil {
+		sig.DeadlineAt = it.Milestone.DueOn
+	}
+	for _, l := range it.Labels {
+		sig.Labels = append(sig.Labels, l.Name)
+	}
+
 	return worklist.WorkItem{
 		ID:     "github:" + repo + "#" + strconv.Itoa(it.Number),
 		Source: "github",
@@ -110,7 +164,8 @@ func (it searchItem) toWorkItem() (worklist.WorkItem, bool) {
 			State:     it.State,
 			UpdatedAt: it.UpdatedAt,
 		},
-		Meta: worklist.Metadata{Origin: worklist.OriginAgent},
+		Signals: sig,
+		Meta:    worklist.Metadata{Origin: worklist.OriginAgent},
 	}, true
 }
 

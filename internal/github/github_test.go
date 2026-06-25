@@ -12,7 +12,7 @@ import (
 // searchBody includes two PRs and one plain issue (no pull_request). The issue
 // must be filtered out, and the PRs deduped across the three signal queries.
 const searchBody = `{"items":[
-  {"number":1,"title":"Fix bug","html_url":"https://github.com/octo/repo/pull/1","state":"open","updated_at":"2026-06-20T10:00:00Z","repository_url":"https://api.github.com/repos/octo/repo","pull_request":{"url":"https://api.github.com/repos/octo/repo/pulls/1"}},
+  {"number":1,"title":"Fix bug","html_url":"https://github.com/octo/repo/pull/1","state":"open","created_at":"2026-06-19T10:00:00Z","updated_at":"2026-06-20T10:00:00Z","comments":5,"repository_url":"https://api.github.com/repos/octo/repo","labels":[{"name":"sig/foo"},{"name":"kind/bug"}],"milestone":{"due_on":"2026-07-01T00:00:00Z"},"reactions":{"total_count":7},"pull_request":{"url":"https://api.github.com/repos/octo/repo/pulls/1"}},
   {"number":2,"title":"Add feature","html_url":"https://github.com/octo/repo/pull/2","state":"open","updated_at":"2026-06-21T10:00:00Z","repository_url":"https://api.github.com/repos/octo/repo","pull_request":{"url":"https://api.github.com/repos/octo/repo/pulls/2"}},
   {"number":3,"title":"A plain issue","html_url":"https://github.com/octo/repo/issues/3","state":"open","updated_at":"2026-06-22T10:00:00Z","repository_url":"https://api.github.com/repos/octo/repo"}
 ]}`
@@ -62,6 +62,44 @@ func TestFetchWorklistMapsFiltersAndDedupes(t *testing.T) {
 	if _, ok := ids["github:octo/repo#2"]; !ok {
 		t.Errorf("missing PR #2; got ids %v", ids)
 	}
+
+	// PR #1 carries the cheap signals mapped straight from the search response.
+	pr1 := ids["github:octo/repo#1"]
+	// The stub returns the same body for all three queries, so PR #1 matches
+	// author, assignee, and review-requested: the reasons merge onto one item.
+	if len(pr1.Signals.Reasons) != 3 {
+		t.Errorf("expected 3 merged reasons, got %v", pr1.Signals.Reasons)
+	}
+	if !hasReason(pr1.Signals.Reasons, worklist.ReasonReviewRequested) {
+		t.Errorf("missing review-requested reason: %v", pr1.Signals.Reasons)
+	}
+	if pr1.Signals.Comments != 5 {
+		t.Errorf("comments = %d, want 5", pr1.Signals.Comments)
+	}
+	if pr1.Signals.Reactions != 7 {
+		t.Errorf("reactions = %d, want 7", pr1.Signals.Reactions)
+	}
+	if got := pr1.Signals.Labels; len(got) != 2 || got[0] != "sig/foo" || got[1] != "kind/bug" {
+		t.Errorf("labels = %v, want [sig/foo kind/bug]", got)
+	}
+	if pr1.Signals.OpenedAt.IsZero() {
+		t.Errorf("opened_at not mapped from created_at")
+	}
+	if pr1.Signals.DeadlineAt.IsZero() {
+		t.Errorf("deadline_at not mapped from milestone due_on")
+	}
+	if pr1.Signals.ObservedAt.IsZero() {
+		t.Errorf("observed_at not stamped")
+	}
+}
+
+func hasReason(rs []worklist.Reason, r worklist.Reason) bool {
+	for _, x := range rs {
+		if x == r {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFetchWorklistPropagatesHTTPError(t *testing.T) {
