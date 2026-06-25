@@ -113,3 +113,61 @@ func TestFetchWorklistPropagatesHTTPError(t *testing.T) {
 		t.Fatal("expected an error when GitHub returns non-200")
 	}
 }
+
+func TestLogin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"login":"octocat"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL)
+	login, err := c.Login(context.Background(), "tok")
+	if err != nil || login != "octocat" {
+		t.Fatalf("Login = %q, %v", login, err)
+	}
+}
+
+func TestAwaitingMeSince(t *testing.T) {
+	const me = "octocat"
+	cases := []struct {
+		name     string
+		body     string
+		wantZero bool
+	}{
+		{
+			name:     "requested and not yet reviewed",
+			body:     `[{"event":"review_requested","created_at":"2026-06-20T10:00:00Z","requested_reviewer":{"login":"octocat"}}]`,
+			wantZero: false,
+		},
+		{
+			name:     "reviewed after the request",
+			body:     `[{"event":"review_requested","created_at":"2026-06-20T10:00:00Z","requested_reviewer":{"login":"octocat"}},{"event":"reviewed","submitted_at":"2026-06-21T10:00:00Z","user":{"login":"octocat"}}]`,
+			wantZero: true,
+		},
+		{
+			name:     "requested of someone else",
+			body:     `[{"event":"review_requested","created_at":"2026-06-20T10:00:00Z","requested_reviewer":{"login":"someone-else"}}]`,
+			wantZero: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c := NewClient(srv.Client(), srv.URL)
+			at, err := c.AwaitingMeSince(context.Background(), "tok", "octo/repo", 1, me)
+			if err != nil {
+				t.Fatalf("AwaitingMeSince: %v", err)
+			}
+			if at.IsZero() != tc.wantZero {
+				t.Fatalf("zero=%v, want %v (at=%v)", at.IsZero(), tc.wantZero, at)
+			}
+		})
+	}
+}

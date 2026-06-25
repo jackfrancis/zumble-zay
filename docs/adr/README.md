@@ -14,3 +14,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0007](0007-orchestrator-colocated-until-spawn.md) | Orchestrator co-located until it spawns real workloads | Accepted |
 | [0008](0008-worklist-ranking-signals-vs-scores.md) | Worklist ranking separates observed signals from computed scores | Accepted |
 | [0009](0009-agent-runtime-contract-boundary.md) | The agent runtime contract is the substrate-neutral boundary | Accepted |
+| [0010](0010-agent-runtimes-capability-scoped.md) | Agent runtimes are capability-scoped, not per-call | Accepted |

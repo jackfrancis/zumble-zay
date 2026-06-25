@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/github"
+	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
 // RunParams configures a single runtime invocation.
@@ -53,4 +54,56 @@ func Run(ctx context.Context, p RunParams) error {
 		return fmt.Errorf("ingest: %w", err)
 	}
 	return nil
+}
+
+// RunEnrich is the github-enrich runtime: a full pass that re-derives the user's
+// work and augments the review-requested PRs with the AwaitingMeSince signal
+// (how long each has been blocked on the user), then posts the result back to
+// ZZ. Like Run it speaks only the ZZClient contract and connects to GitHub
+// directly (docs/adr/0006, 0009). Per-item enrichment is best-effort: a failed
+// call leaves the signal zero rather than failing the whole job.
+func RunEnrich(ctx context.Context, p RunParams) error {
+	if p.Client == nil {
+		p.Client = &http.Client{Timeout: 30 * time.Second}
+	}
+	zz := NewZZClient(p.BaseURL, p.Token, p.Client)
+
+	cred, err := zz.VendCredential(ctx, p.Provider)
+	if err != nil {
+		return fmt.Errorf("vend credential: %w", err)
+	}
+	gh := github.NewClient(p.Client, p.GitHubBaseURL)
+	login, err := gh.Login(ctx, cred.AccessToken)
+	if err != nil {
+		return fmt.Errorf("github login: %w", err)
+	}
+	items, err := gh.FetchWorklist(ctx, cred.AccessToken)
+	if err != nil {
+		return fmt.Errorf("fetch github: %w", err)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	for i := range items {
+		if !reviewRequested(items[i].Signals.Reasons) {
+			continue
+		}
+		// Best-effort: a failed call leaves AwaitingMeSince zero.
+		if at, err := gh.AwaitingMeSince(ctx, cred.AccessToken, items[i].GitHub.Repo, items[i].GitHub.Number, login); err == nil && !at.IsZero() {
+			items[i].Signals.AwaitingMeSince = at
+		}
+	}
+	if err := zz.Ingest(ctx, items); err != nil {
+		return fmt.Errorf("ingest: %w", err)
+	}
+	return nil
+}
+
+func reviewRequested(rs []worklist.Reason) bool {
+	for _, r := range rs {
+		if r == worklist.ReasonReviewRequested {
+			return true
+		}
+	}
+	return false
 }

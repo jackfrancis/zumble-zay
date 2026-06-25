@@ -124,6 +124,41 @@ func (errLauncher) Launch(context.Context, orchestrator.JobSpec, string) error {
 	return errors.New("boom")
 }
 
+// recordingLauncher reports each launched job's type, succeeding immediately.
+type recordingLauncher struct {
+	seen chan orchestrator.JobType
+}
+
+func (r *recordingLauncher) Launch(_ context.Context, spec orchestrator.JobSpec, _ string) error {
+	r.seen <- spec.Type
+	return nil
+}
+
+func TestIngestSuccessChainsEnrichment(t *testing.T) {
+	m := mint.NewMinter([]byte(testSecret), time.Minute)
+	rl := &recordingLauncher{seen: make(chan orchestrator.JobType, 8)}
+	o := orchestrator.New(m, rl, nil)
+	defer o.Stop()
+
+	if err := o.EnsureBackfill(context.Background(), "github:9"); err != nil {
+		t.Fatalf("EnsureBackfill: %v", err)
+	}
+
+	got := map[orchestrator.JobType]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(got) < 2 {
+		select {
+		case ty := <-rl.seen:
+			got[ty] = true
+		case <-deadline:
+			t.Fatalf("expected ingest then enrich; saw %v", got)
+		}
+	}
+	if !got[orchestrator.JobGitHubIngest] || !got[orchestrator.JobGitHubEnrich] {
+		t.Fatalf("expected both job types; saw %v", got)
+	}
+}
+
 func hasScope(scopes []principal.Scope, want principal.Scope) bool {
 	for _, s := range scopes {
 		if s == want {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,17 +49,24 @@ func TestAgenticBackfillEndToEnd(t *testing.T) {
 	// the credential flowed ZZ vault -> vend -> agent -> GitHub.
 	var ghCalls int32
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/search/issues" {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
 		if r.Header.Get("Authorization") != "Bearer "+ghToken {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		atomic.AddInt32(&ghCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, githubSearchBody)
+		switch {
+		case r.URL.Path == "/search/issues":
+			atomic.AddInt32(&ghCalls, 1)
+			_, _ = io.WriteString(w, githubSearchBody)
+		case r.URL.Path == "/user":
+			// The chained github-enrich runtime resolves "me" before scanning
+			// review-request timelines.
+			_, _ = io.WriteString(w, `{"login":"octo-me"}`)
+		case strings.HasSuffix(r.URL.Path, "/timeline"):
+			_, _ = io.WriteString(w, `[]`)
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
 	}))
 	defer fakeGH.Close()
 

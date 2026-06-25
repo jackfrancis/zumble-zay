@@ -27,6 +27,13 @@ type JobType string
 // JobGitHubIngest retrieves a user's GitHub work items.
 const JobGitHubIngest JobType = "github-ingest"
 
+// JobGitHubEnrich refines a user's existing GitHub work items with expensive,
+// per-item signals (e.g. AwaitingMeSince) that need extra API calls. It is a
+// distinct capability from ingestion — its own scopes, rate-limit budget, and
+// failure domain — so it can be scaled or throttled independently and later run
+// as its own out-of-process runtime (docs/adr/0009).
+const JobGitHubEnrich JobType = "github-enrich"
+
 // JobState is a point in a job's lifecycle.
 type JobState string
 
@@ -83,6 +90,10 @@ type policyEntry struct {
 
 var policies = map[JobType]policyEntry{
 	JobGitHubIngest: {
+		provider: "github",
+		scopes:   []principal.Scope{principal.ScopeSignalsRead, principal.ScopeMetadataWrite},
+	},
+	JobGitHubEnrich: {
 		provider: "github",
 		scopes:   []principal.Scope{principal.ScopeSignalsRead, principal.ScopeMetadataWrite},
 	},
@@ -233,8 +244,18 @@ func (o *Orchestrator) run(id string) {
 		}
 	}
 	job.UpdatedAt = time.Now().UTC()
+	jobType, user := job.Type, job.ActingUserID
 	delete(o.inflight, key)
 	o.mu.Unlock()
+
+	// Pipeline: a successful ingest hands off to enrichment of the same user's
+	// work. Enrichment is a distinct capability (its own scopes, rate-limit
+	// budget, and failure domain) and does not chain further.
+	if err == nil && jobType == JobGitHubIngest {
+		if e := o.enqueue(JobGitHubEnrich, user); e != nil && o.log != nil {
+			o.log.Warn("could not enqueue enrichment", "user", user, "err", e)
+		}
+	}
 }
 
 // Job returns a copy of the tracked job, if present. Intended for status and

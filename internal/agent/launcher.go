@@ -38,15 +38,23 @@ func (l *InProcessLauncher) WithGitHubBaseURL(u string) *InProcessLauncher {
 }
 
 // Launch satisfies orchestrator.Launcher by running the runtime to completion.
+// It selects the runtime entrypoint by job type, so each capability (ingest,
+// enrich) is a distinct unit behind the same dispatch seam.
 func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpec, token string) error {
 	if l.log != nil {
-		l.log.Info("agent runtime starting", "job", spec.JobID, "provider", spec.Provider)
+		l.log.Info("agent runtime starting", "job", spec.JobID, "type", spec.Type, "provider", spec.Provider)
 	}
-	return Run(ctx, RunParams{
+	p := RunParams{
 		BaseURL:       l.zzBaseURL,
 		GitHubBaseURL: l.githubBaseURL,
 		Client:        l.client,
 		Token:         token,
 		Provider:      spec.Provider,
-	})
+	}
+	switch spec.Type {
+	case orchestrator.JobGitHubEnrich:
+		return RunEnrich(ctx, p)
+	default:
+		return Run(ctx, p)
+	}
 }
