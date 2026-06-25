@@ -57,3 +57,8 @@ data loss; merged reasons preserved) but wasteful. The planned improvement is an
 **agent read contract** (a workload-scoped "fetch my shortlist") so enrichment
 augments stored items in place instead of re-fetching — turning the pipeline
 stages into true producer/refiner halves.
+
+- *Realized:* the agent contract now has a read path — `GET /agent/worklist`
+  (workload-scoped, no rescore/backfill) and `ZZClient.ListWorklist`. `github-
+  enrich` reads the persisted items, augments review-requested PRs in place, and
+  writes back only what changed — no duplicate search.

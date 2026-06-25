@@ -72,3 +72,22 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ingested": len(req.Items)})
 }
+
+// List handles GET /agent/worklist. It returns the acting user's persisted work
+// items verbatim — no read-time rescore and no backfill-on-empty — so an
+// enrichment runtime can augment stored items in place rather than re-deriving
+// them from the provider (docs/adr/0010). Multi-tenant isolation: a workload
+// only ever sees its acting user's items.
+func (h *IngestHandler) List(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal.FromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	items, err := h.store.List(r.Context(), p.ActingUserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load work items")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}

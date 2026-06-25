@@ -96,6 +96,9 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	// ingest is the runtime's output sink back into ZZ.
 	mux.Handle("POST /agent/credentials/{provider}", authenticator.RequireScope(principal.ScopeSignalsRead, http.HandlerFunc(credentialHandler.Vend)))
 	mux.Handle("POST /agent/worklist", authenticator.RequireScope(principal.ScopeMetadataWrite, http.HandlerFunc(ingestHandler.Ingest)))
+	// Read path: a runtime reads its acting user's persisted work to augment it
+	// in place (docs/adr/0010) rather than re-deriving it from the provider.
+	mux.Handle("GET /agent/worklist", authenticator.RequireScope(principal.ScopeSignalsRead, http.HandlerFunc(ingestHandler.List)))
 
 	// Global middleware chain (outermost first).
 	var h http.Handler = mux

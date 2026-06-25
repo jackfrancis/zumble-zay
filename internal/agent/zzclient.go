@@ -111,3 +111,30 @@ func (c *ZZClient) Ingest(ctx context.Context, items []worklist.WorkItem) error 
 	}
 	return nil
 }
+
+// ListWorklist performs the read side of the contract: GET /agent/worklist,
+// returning the acting user's persisted work items so a runtime can augment
+// them in place rather than re-deriving them from the provider (docs/adr/0010).
+func (c *ZZClient) ListWorklist(ctx context.Context) ([]worklist.WorkItem, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/agent/worklist", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var body struct {
+		Items []worklist.WorkItem `json:"items"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.Items, nil
+}

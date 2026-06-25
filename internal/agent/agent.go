@@ -56,12 +56,12 @@ func Run(ctx context.Context, p RunParams) error {
 	return nil
 }
 
-// RunEnrich is the github-enrich runtime: a full pass that re-derives the user's
-// work and augments the review-requested PRs with the AwaitingMeSince signal
-// (how long each has been blocked on the user), then posts the result back to
-// ZZ. Like Run it speaks only the ZZClient contract and connects to GitHub
-// directly (docs/adr/0006, 0009). Per-item enrichment is best-effort: a failed
-// call leaves the signal zero rather than failing the whole job.
+// RunEnrich is the github-enrich runtime: it reads the user's persisted work
+// from ZZ and augments the review-requested PRs with the AwaitingMeSince signal
+// (how long each has been blocked on the user), writing back only the items it
+// changed. Like Run it speaks only the ZZClient contract and connects to GitHub
+// directly (docs/adr/0006, 0009, 0010). Per-item enrichment is best-effort: a
+// failed call leaves the signal unchanged.
 func RunEnrich(ctx context.Context, p RunParams) error {
 	if p.Client == nil {
 		p.Client = &http.Client{Timeout: 30 * time.Second}
@@ -77,23 +77,27 @@ func RunEnrich(ctx context.Context, p RunParams) error {
 	if err != nil {
 		return fmt.Errorf("github login: %w", err)
 	}
-	items, err := gh.FetchWorklist(ctx, cred.AccessToken)
+	items, err := zz.ListWorklist(ctx)
 	if err != nil {
-		return fmt.Errorf("fetch github: %w", err)
+		return fmt.Errorf("list worklist: %w", err)
 	}
-	if len(items) == 0 {
-		return nil
-	}
+	// Augment stored items in place: only review-requested PRs need the timeline
+	// call, and only changed items are written back (docs/adr/0010).
+	var changed []worklist.WorkItem
 	for i := range items {
 		if !reviewRequested(items[i].Signals.Reasons) {
 			continue
 		}
-		// Best-effort: a failed call leaves AwaitingMeSince zero.
-		if at, err := gh.AwaitingMeSince(ctx, cred.AccessToken, items[i].GitHub.Repo, items[i].GitHub.Number, login); err == nil && !at.IsZero() {
+		at, err := gh.AwaitingMeSince(ctx, cred.AccessToken, items[i].GitHub.Repo, items[i].GitHub.Number, login)
+		if err == nil && !at.IsZero() && !at.Equal(items[i].Signals.AwaitingMeSince) {
 			items[i].Signals.AwaitingMeSince = at
+			changed = append(changed, items[i])
 		}
 	}
-	if err := zz.Ingest(ctx, items); err != nil {
+	if len(changed) == 0 {
+		return nil
+	}
+	if err := zz.Ingest(ctx, changed); err != nil {
 		return fmt.Errorf("ingest: %w", err)
 	}
 	return nil

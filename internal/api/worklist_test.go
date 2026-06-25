@@ -165,3 +165,34 @@ func TestWorklistRescoresFromSignalsAtReadTime(t *testing.T) {
 		t.Fatalf("urgency should rise as the deadline approaches: early=%v late=%v", early.Urgency, late.Urgency)
 	}
 }
+
+func TestAgentWorklistListReturnsStoredItemsRaw(t *testing.T) {
+	store := worklist.NewMemoryStore()
+	// Stored with a non-trivial rank; the agent read must return it verbatim,
+	// without the read-time rescore that GET /api/worklist applies.
+	store.Seed("u1", worklist.WorkItem{
+		ID: "x", OwnerID: "u1",
+		Signals: worklist.Signals{Reasons: []worklist.Reason{worklist.ReasonReviewRequested}},
+		Meta:    worklist.Metadata{Rank: 0.42, Origin: worklist.OriginAgent},
+	})
+	h := NewIngestHandler(store)
+
+	rec := httptest.NewRecorder()
+	h.List(rec, authedRequest("/agent/worklist", "u1"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Items []worklist.WorkItem `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 1 || body.Items[0].ID != "x" {
+		t.Fatalf("unexpected items: %+v", body.Items)
+	}
+	if body.Items[0].Meta.Rank != 0.42 {
+		t.Errorf("agent read must not rescore: rank=%v want 0.42", body.Items[0].Meta.Rank)
+	}
+}
