@@ -57,13 +57,13 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		req.Items[i].OwnerID = p.ActingUserID
 		// Provenance: agent writes are always agent-derived; humans override.
 		req.Items[i].Meta.Origin = worklist.OriginAgent
-		if req.Items[i].Meta.UpdatedAt.IsZero() {
-			req.Items[i].Meta.UpdatedAt = now
-		}
+		// Decorate ZZ metadata by scoring the item's signals (docs/adr/0008).
+		req.Items[i].Meta = worklist.Score(req.Items[i], now)
 		if req.Items[i].CreatedAt.IsZero() {
 			req.Items[i].CreatedAt = now
 		}
 		req.Items[i].UpdatedAt = now
+		req.Items[i].Meta.UpdatedAt = now
 	}
 
 	if err := h.store.Upsert(r.Context(), p.ActingUserID, req.Items...); err != nil {
