@@ -40,33 +40,27 @@ func (l *InProcessLauncher) WithGitHubBaseURL(u string) *InProcessLauncher {
 }
 
 // WithRanker sets the AxisRanker used by llm-rank jobs. A nil ranker (the
-// default) makes RunRank use the deterministic StubRanker.
+// default) makes the llm-rank runtime use the deterministic StubRanker.
 func (l *InProcessLauncher) WithRanker(r worklist.AxisRanker) *InProcessLauncher {
 	l.ranker = r
 	return l
 }
 
 // Launch satisfies orchestrator.Launcher by running the runtime to completion.
-// It selects the runtime entrypoint by job type, so each capability (ingest,
-// enrich, llm-rank) is a distinct unit behind the same dispatch seam.
+// It drives the same single runtime entrypoint (agent.Run) the standalone
+// cmd/runtime binary uses, so behaviour is identical across substrates; job-type
+// dispatch lives in agent.Run (docs/adr/0012).
 func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpec, token string) error {
 	if l.log != nil {
 		l.log.Info("agent runtime starting", "job", spec.JobID, "type", spec.Type, "provider", spec.Provider)
 	}
-	p := RunParams{
+	return Run(ctx, RunParams{
+		JobType:       string(spec.Type),
 		BaseURL:       l.zzBaseURL,
 		GitHubBaseURL: l.githubBaseURL,
 		Client:        l.client,
 		Token:         token,
 		Provider:      spec.Provider,
 		Ranker:        l.ranker,
-	}
-	switch spec.Type {
-	case orchestrator.JobGitHubEnrich:
-		return RunEnrich(ctx, p)
-	case orchestrator.JobLLMRank:
-		return RunRank(ctx, p)
-	default:
-		return Run(ctx, p)
-	}
+	})
 }

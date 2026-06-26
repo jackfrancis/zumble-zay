@@ -1,5 +1,6 @@
 .PHONY: build run test tidy vet fmt clean image image-save kind-load engine \
-        cluster-up cluster-down dev-up dev-down dev-forward dev-logs
+        cluster-up cluster-down dev-up dev-down dev-forward dev-logs \
+        build-runtime image-runtime
 
 BIN := bin/server
 
@@ -11,6 +12,11 @@ CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2
 # localhost registry as local, so kind-loaded images resolve without a pull.
 IMAGE ?= localhost/zumble-zay:dev
 
+# Standalone agent runtime artifact (docs/adr/0012): the same runtime that runs
+# in-process, built as a binary/image so it can run as an out-of-process workload.
+RUNTIME_BIN := bin/runtime
+RUNTIME_IMAGE ?= localhost/zumble-zay-runtime:dev
+
 KIND_CLUSTER ?= zumble-zay
 KUBE_NS := zumble-zay
 
@@ -21,6 +27,10 @@ endif
 
 build:
 	go build -o $(BIN) ./cmd/server
+
+# Build the standalone agent runtime binary.
+build-runtime:
+	go build -o $(RUNTIME_BIN) ./cmd/runtime
 
 run:
 	go run ./cmd/server
@@ -48,6 +58,10 @@ engine:
 # Build the image with whichever engine is available.
 image: engine
 	$(CONTAINER_ENGINE) build -t $(IMAGE) .
+
+# Build the standalone agent runtime image (docs/adr/0012).
+image-runtime: engine
+	$(CONTAINER_ENGINE) build -f Dockerfile.runtime -t $(RUNTIME_IMAGE) .
 
 # Export the image to a portable archive (works with docker and podman).
 image-save: image

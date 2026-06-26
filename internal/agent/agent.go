@@ -1,7 +1,9 @@
-// Package agent is the ephemeral GitHub-ingestion runtime. It is the only
-// component besides the composition root that imports a provider client: ZZ is
-// a credential broker, not a data broker, so the agent connects to GitHub
-// directly (see docs/adr/0006).
+// Package agent is the ephemeral agent runtime. Its single entrypoint, Run,
+// dispatches on job type (github-ingest, github-enrich, llm-rank) and is shared
+// by the in-process launcher and the standalone cmd/runtime binary
+// (docs/adr/0012). It is the only component besides the composition root that
+// imports a provider client: ZZ is a credential broker, not a data broker, so
+// the agent connects to GitHub directly (see docs/adr/0006).
 //
 // A runtime carries a ZZ-minted job token and uses the same HTTP contract a
 // future out-of-process Pod will use (docs/adr/0007): it vends the user's
@@ -23,6 +25,7 @@ import (
 
 // RunParams configures a single runtime invocation.
 type RunParams struct {
+	JobType       string              // selects the runtime: github-ingest|github-enrich|llm-rank
 	BaseURL       string              // ZZ base URL (loopback in-process today)
 	GitHubBaseURL string              // GitHub API base; empty uses the public API
 	Client        *http.Client        // shared HTTP client
@@ -32,11 +35,37 @@ type RunParams struct {
 	Ranker        worklist.AxisRanker // axis ranker for llm-rank jobs; nil uses the stub
 }
 
-// Run executes the ingestion job: vend the provider credential from ZZ, fetch
-// the user's work directly from GitHub, then post it to ZZ's ingest sink. An
-// empty result is a successful no-op. The ZZ calls go through ZZClient, the
-// substrate-neutral runtime contract (docs/adr/0009).
+// Runtime job types. These values are the contract between the orchestrator
+// (which schedules jobs) and the runtime (which executes them); they must match
+// the orchestrator's JobType constants. See docs/adr/0012.
+const (
+	JobIngest = "github-ingest"
+	JobEnrich = "github-enrich"
+	JobRank   = "llm-rank"
+)
+
+// Run is the single runtime entrypoint: it executes the job selected by
+// p.JobType. The in-process launcher and the standalone cmd/runtime binary both
+// call it, so the runtime behaves identically regardless of substrate
+// (docs/adr/0012). Dispatch is by job type; the per-type logic is unchanged.
 func Run(ctx context.Context, p RunParams) error {
+	switch p.JobType {
+	case JobEnrich:
+		return runEnrich(ctx, p)
+	case JobRank:
+		return runRank(ctx, p)
+	case JobIngest:
+		return runIngest(ctx, p)
+	default:
+		return fmt.Errorf("agent: unknown job type %q", p.JobType)
+	}
+}
+
+// runIngest executes the github-ingest job: vend the provider credential from
+// ZZ, fetch the user's work directly from GitHub, then post it to ZZ's ingest
+// sink. An empty result is a successful no-op. The ZZ calls go through ZZClient,
+// the substrate-neutral runtime contract (docs/adr/0009).
+func runIngest(ctx context.Context, p RunParams) error {
 	if p.Client == nil {
 		p.Client = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -74,13 +103,13 @@ func enrichLimit(n int) int {
 	return n
 }
 
-// RunEnrich is the github-enrich runtime: it reads the user's persisted work
+// runEnrich is the github-enrich runtime: it reads the user's persisted work
 // from ZZ and augments the review-requested PRs with the AwaitingMeSince signal
 // (how long each has been blocked on the user), writing back only the items it
-// changed. Like Run it speaks only the ZZClient contract and connects to GitHub
-// directly (docs/adr/0006, 0009, 0010). Per-item enrichment is best-effort: a
-// failed call leaves the signal unchanged.
-func RunEnrich(ctx context.Context, p RunParams) error {
+// changed. Like runIngest it speaks only the ZZClient contract and connects to
+// GitHub directly (docs/adr/0006, 0009, 0010). Per-item enrichment is
+// best-effort: a failed call leaves the signal unchanged.
+func runEnrich(ctx context.Context, p RunParams) error {
 	if p.Client == nil {
 		p.Client = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -140,13 +169,13 @@ func RunEnrich(ctx context.Context, p RunParams) error {
 	return nil
 }
 
-// RunRank is the llm-rank runtime: it reads the user's persisted work (the
+// runRank is the llm-rank runtime: it reads the user's persisted work (the
 // ranked top-K shortlist), asks the AxisRanker to propose the four axes for each
 // item, and writes the proposals back to ZZ, which ratifies them against the
 // deterministic baseline (docs/adr/0011). With the StubRanker this is a no-op
 // over ordering; a real model is swapped in behind the AxisRanker interface.
 // Per-item ranking is best-effort: a failed proposal leaves the item unchanged.
-func RunRank(ctx context.Context, p RunParams) error {
+func runRank(ctx context.Context, p RunParams) error {
 	if p.Client == nil {
 		p.Client = &http.Client{Timeout: 30 * time.Second}
 	}
