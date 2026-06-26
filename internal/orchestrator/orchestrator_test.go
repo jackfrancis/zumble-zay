@@ -146,16 +146,16 @@ func TestIngestSuccessChainsEnrichment(t *testing.T) {
 
 	got := map[orchestrator.JobType]bool{}
 	deadline := time.After(2 * time.Second)
-	for len(got) < 2 {
+	for len(got) < 3 {
 		select {
 		case ty := <-rl.seen:
 			got[ty] = true
 		case <-deadline:
-			t.Fatalf("expected ingest then enrich; saw %v", got)
+			t.Fatalf("expected the full pipeline; saw %v", got)
 		}
 	}
-	if !got[orchestrator.JobGitHubIngest] || !got[orchestrator.JobGitHubEnrich] {
-		t.Fatalf("expected both job types; saw %v", got)
+	if !got[orchestrator.JobGitHubIngest] || !got[orchestrator.JobGitHubEnrich] || !got[orchestrator.JobLLMRank] {
+		t.Fatalf("expected ingest, enrich, and llm-rank; saw %v", got)
 	}
 }
 

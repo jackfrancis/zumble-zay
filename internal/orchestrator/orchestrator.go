@@ -34,6 +34,12 @@ const JobGitHubIngest JobType = "github-ingest"
 // as its own out-of-process runtime (docs/adr/0009).
 const JobGitHubEnrich JobType = "github-enrich"
 
+// JobLLMRank produces the four ranking axes for a user's items via an LLM and
+// writes them back as a proposal ZZ ratifies against the deterministic baseline
+// (docs/adr/0011). It reads and writes ZZ only — no provider credential — so its
+// policy grants no provider.
+const JobLLMRank JobType = "llm-rank"
+
 // JobState is a point in a job's lifecycle.
 type JobState string
 
@@ -95,6 +101,10 @@ var policies = map[JobType]policyEntry{
 	},
 	JobGitHubEnrich: {
 		provider: "github",
+		scopes:   []principal.Scope{principal.ScopeSignalsRead, principal.ScopeMetadataWrite},
+	},
+	JobLLMRank: {
+		provider: "",
 		scopes:   []principal.Scope{principal.ScopeSignalsRead, principal.ScopeMetadataWrite},
 	},
 }
@@ -248,13 +258,27 @@ func (o *Orchestrator) run(id string) {
 	delete(o.inflight, key)
 	o.mu.Unlock()
 
-	// Pipeline: a successful ingest hands off to enrichment of the same user's
-	// work. Enrichment is a distinct capability (its own scopes, rate-limit
-	// budget, and failure domain) and does not chain further.
-	if err == nil && jobType == JobGitHubIngest {
-		if e := o.enqueue(JobGitHubEnrich, user); e != nil && o.log != nil {
-			o.log.Warn("could not enqueue enrichment", "user", user, "err", e)
+	// Pipeline: each successful stage hands off to the next (ingest -> enrich ->
+	// llm-rank). Each stage is a distinct capability (its own scopes, rate-limit
+	// budget, and failure domain); the final stage does not chain further.
+	if err == nil {
+		if next, ok := nextStage(jobType); ok {
+			if e := o.enqueue(next, user); e != nil && o.log != nil {
+				o.log.Warn("could not enqueue next pipeline stage", "stage", next, "user", user, "err", e)
+			}
 		}
+	}
+}
+
+// nextStage returns the capability that follows t in the ingestion pipeline.
+func nextStage(t JobType) (JobType, bool) {
+	switch t {
+	case JobGitHubIngest:
+		return JobGitHubEnrich, true
+	case JobGitHubEnrich:
+		return JobLLMRank, true
+	default:
+		return "", false
 	}
 }
 

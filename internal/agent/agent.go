@@ -22,12 +22,13 @@ import (
 
 // RunParams configures a single runtime invocation.
 type RunParams struct {
-	BaseURL       string       // ZZ base URL (loopback in-process today)
-	GitHubBaseURL string       // GitHub API base; empty uses the public API
-	Client        *http.Client // shared HTTP client
-	Token         string       // ZZ job token (bearer)
-	Provider      string       // e.g. "github"
-	EnrichLimit   int          // max items to enrich per run; 0 uses the default
+	BaseURL       string              // ZZ base URL (loopback in-process today)
+	GitHubBaseURL string              // GitHub API base; empty uses the public API
+	Client        *http.Client        // shared HTTP client
+	Token         string              // ZZ job token (bearer)
+	Provider      string              // e.g. "github"
+	EnrichLimit   int                 // max items to enrich per run; 0 uses the default
+	Ranker        worklist.AxisRanker // axis ranker for llm-rank jobs; nil uses the stub
 }
 
 // Run executes the ingestion job: vend the provider credential from ZZ, fetch
@@ -108,6 +109,45 @@ func RunEnrich(ctx context.Context, p RunParams) error {
 		s.Participants = act.Participants
 		s.InboundRefs = act.InboundRefs
 		s.AwaitingMeSince = act.AwaitingMeSince
+		changed = append(changed, items[i])
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	if err := zz.Ingest(ctx, changed); err != nil {
+		return fmt.Errorf("ingest: %w", err)
+	}
+	return nil
+}
+
+// RunRank is the llm-rank runtime: it reads the user's persisted work (the
+// ranked top-K shortlist), asks the AxisRanker to propose the four axes for each
+// item, and writes the proposals back to ZZ, which ratifies them against the
+// deterministic baseline (docs/adr/0011). With the StubRanker this is a no-op
+// over ordering; a real model is swapped in behind the AxisRanker interface.
+// Per-item ranking is best-effort: a failed proposal leaves the item unchanged.
+func RunRank(ctx context.Context, p RunParams) error {
+	if p.Client == nil {
+		p.Client = &http.Client{Timeout: 30 * time.Second}
+	}
+	ranker := p.Ranker
+	if ranker == nil {
+		ranker = worklist.NewStubRanker()
+	}
+	zz := NewZZClient(p.BaseURL, p.Token, p.Client)
+
+	items, err := zz.ListWorklist(ctx, enrichLimit(p.EnrichLimit))
+	if err != nil {
+		return fmt.Errorf("list worklist: %w", err)
+	}
+	var changed []worklist.WorkItem
+	for i := range items {
+		prop, err := ranker.Propose(ctx, items[i])
+		if err != nil {
+			continue // best-effort: leave the item without a proposal
+		}
+		proposal := prop
+		items[i].Signals.Proposed = &proposal
 		changed = append(changed, items[i])
 	}
 	if len(changed) == 0 {

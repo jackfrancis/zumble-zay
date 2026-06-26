@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
+	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
 // InProcessLauncher runs an agent runtime inline in the ZZ process. It is the
@@ -18,6 +19,7 @@ type InProcessLauncher struct {
 	githubBaseURL string
 	client        *http.Client
 	log           *slog.Logger
+	ranker        worklist.AxisRanker
 }
 
 // NewInProcessLauncher builds a launcher that targets ZZ at zzBaseURL (a
@@ -37,9 +39,16 @@ func (l *InProcessLauncher) WithGitHubBaseURL(u string) *InProcessLauncher {
 	return l
 }
 
+// WithRanker sets the AxisRanker used by llm-rank jobs. A nil ranker (the
+// default) makes RunRank use the deterministic StubRanker.
+func (l *InProcessLauncher) WithRanker(r worklist.AxisRanker) *InProcessLauncher {
+	l.ranker = r
+	return l
+}
+
 // Launch satisfies orchestrator.Launcher by running the runtime to completion.
 // It selects the runtime entrypoint by job type, so each capability (ingest,
-// enrich) is a distinct unit behind the same dispatch seam.
+// enrich, llm-rank) is a distinct unit behind the same dispatch seam.
 func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpec, token string) error {
 	if l.log != nil {
 		l.log.Info("agent runtime starting", "job", spec.JobID, "type", spec.Type, "provider", spec.Provider)
@@ -50,10 +59,13 @@ func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpe
 		Client:        l.client,
 		Token:         token,
 		Provider:      spec.Provider,
+		Ranker:        l.ranker,
 	}
 	switch spec.Type {
 	case orchestrator.JobGitHubEnrich:
 		return RunEnrich(ctx, p)
+	case orchestrator.JobLLMRank:
+		return RunRank(ctx, p)
 	default:
 		return Run(ctx, p)
 	}
