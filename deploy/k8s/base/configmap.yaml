@@ -14,10 +14,12 @@ data:
   COOKIE_SECURE: "true"
   MICROSOFT_TENANT: "common"
   # Agent-runtime substrate: how the orchestrator launches agent jobs. The swap
-  # is config-only (ADR 0012). "inprocess" (default) runs jobs in the server
-  # process; "k8s-job" runs each as a Kubernetes Job (requires the launcher
-  # RBAC). An unknown value fails fast at startup.
-  LAUNCHER: "inprocess"
+  # is config-only (ADR 0012). "k8s-job" runs each agent job as a Kubernetes Job
+  # (the deployed default — Kubernetes is the substrate; requires the launcher
+  # RBAC and the runtime image). "inprocess" runs jobs in the server process and
+  # is the code-level default for non-cluster runs (local, tests, CI). An unknown
+  # value fails fast at startup.
+  LAUNCHER: "k8s-job"
   # Out-of-process runtime settings, used only when LAUNCHER=k8s-job. These have
   # code defaults; override per environment. RUNTIME_SERVICE_ACCOUNT is optional
   # (the runtime only needs HTTP egress to ZZ, not the Kubernetes API).

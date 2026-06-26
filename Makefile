@@ -94,8 +94,10 @@ cluster-down:
 	-kind delete cluster --name $(KIND_CLUSTER)
 
 # One shot: build the image from the current source, stand up a kind cluster,
-# load the image, deploy the dev overlay, and wait until the app is ready.
-dev-up: cluster-up kind-load
+# load the image, deploy the dev overlay, and wait until the app is ready. The
+# runtime image is loaded too because the deployed default LAUNCHER is k8s-job,
+# which runs agent jobs from that image (ADR 0012).
+dev-up: cluster-up kind-load kind-load-runtime
 	@kubectl create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl apply -f -
 	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets >/dev/null 2>&1 || \
 		kubectl -n $(KUBE_NS) create secret generic zumble-zay-secrets \
