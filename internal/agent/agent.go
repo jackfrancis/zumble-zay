@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/github"
@@ -62,6 +63,10 @@ func Run(ctx context.Context, p RunParams) error {
 // per-item signals for, capping GitHub API fan-out (docs/adr/0010).
 const defaultEnrichLimit = 50
 
+// enrichConcurrency bounds how many per-item timeline calls run at once, so the
+// fan-out finishes quickly without overrunning the job deadline.
+const enrichConcurrency = 8
+
 func enrichLimit(n int) int {
 	if n <= 0 {
 		return defaultEnrichLimit
@@ -94,23 +99,38 @@ func RunEnrich(ctx context.Context, p RunParams) error {
 	if err != nil {
 		return fmt.Errorf("list worklist: %w", err)
 	}
-	// Augment stored items in place from a single per-item timeline call, and
-	// write back only what changed (docs/adr/0010).
-	var changed []worklist.WorkItem
+	// Augment stored items in place from a per-item timeline call. The calls run
+	// with bounded concurrency so the fan-out finishes quickly and does not blow
+	// the job deadline (docs/adr/0010). Only changed items are written back.
+	var (
+		mu      sync.Mutex
+		changed []worklist.WorkItem
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, enrichConcurrency)
+	)
 	for i := range items {
-		act, err := gh.ItemActivity(ctx, cred.AccessToken, items[i].GitHub.Repo, items[i].GitHub.Number, login)
-		if err != nil {
-			continue // best-effort: leave the item's signals unchanged
-		}
-		s := &items[i].Signals
-		if act.Participants == s.Participants && act.InboundRefs == s.InboundRefs && act.AwaitingMeSince.Equal(s.AwaitingMeSince) {
-			continue
-		}
-		s.Participants = act.Participants
-		s.InboundRefs = act.InboundRefs
-		s.AwaitingMeSince = act.AwaitingMeSince
-		changed = append(changed, items[i])
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			act, err := gh.ItemActivity(ctx, cred.AccessToken, items[i].GitHub.Repo, items[i].GitHub.Number, login)
+			if err != nil {
+				return // best-effort: leave the item's signals unchanged
+			}
+			s := &items[i].Signals
+			if act.Participants == s.Participants && act.InboundRefs == s.InboundRefs && act.AwaitingMeSince.Equal(s.AwaitingMeSince) {
+				return
+			}
+			s.Participants = act.Participants
+			s.InboundRefs = act.InboundRefs
+			s.AwaitingMeSince = act.AwaitingMeSince
+			mu.Lock()
+			changed = append(changed, items[i])
+			mu.Unlock()
+		}(i)
 	}
+	wg.Wait()
 	if len(changed) == 0 {
 		return nil
 	}

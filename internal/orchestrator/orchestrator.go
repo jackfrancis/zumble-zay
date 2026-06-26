@@ -111,8 +111,12 @@ var policies = map[JobType]policyEntry{
 
 const (
 	defaultWorkers = 2
-	defaultJobTTL  = 30 * time.Second
-	queueDepth     = 128
+	// Fan-out jobs (e.g. github-enrich) make many provider calls, so the per-job
+	// deadline must leave generous headroom; the in-process runtimes are bounded
+	// anyway. Too tight a deadline cancels the job mid-flight, discards its work,
+	// and breaks the pipeline chain.
+	defaultJobTTL = 2 * time.Minute
+	queueDepth    = 128
 )
 
 // Orchestrator accepts ingestion requests and supervises agent runtimes.
