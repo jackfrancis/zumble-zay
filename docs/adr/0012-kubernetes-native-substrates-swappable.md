@@ -112,3 +112,19 @@ Each step is additive and independently shippable; none touches ZZ core.
    `KueueLauncher`, `SandboxLauncher`, custom — to compare lifecycle, isolation,
    identity, and cost. (Kueue's admission unit is a `Workload` CRD, so it is its
    own launcher rather than a reason to genericize the others.)
+
+Steps 1-6 and the first sibling of step 7 are done; the swap **mechanism** is
+complete and proven (in-process, `k8s-job`, and `k8s-pod` produce identical
+pipeline output in kind). Remaining step-7 substrates are an additive backlog,
+not unfinished plumbing:
+
+- [x] `KubernetesJobLauncher` — reference (step 5).
+- [x] `KubernetesPodLauncher` — bare Pod; lifecycle contrast (no retry/backoff/TTL GC).
+- [ ] `KueueLauncher` — a suspended, queue-labelled Job admitted by Kueue against a
+      ClusterQueue/LocalQueue; adds admission control/quota. Needs Kueue installed
+      in the cluster + a dev queue.
+- [ ] `SandboxLauncher` — agent-sandbox CRD/controller for stronger isolation.
+      Needs that controller installed.
+- [ ] `KagentLauncher` — a long-lived service, so it first requires ZZ to expose a
+      public RFC 8693 token-exchange endpoint (a persistent service obtains a
+      per-job token rather than being born with one; anticipated in ADR 0009).

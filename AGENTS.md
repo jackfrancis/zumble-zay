@@ -142,6 +142,10 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    scope-gated, with provenance and optimistic concurrency.
 5. Cloud persistence behind `worklist.Store`; shared session store; then scale
    `replicas > 1`.
+6. Additional agent substrates behind the `Launcher` seam (ADR 0012 step 7):
+   `KueueLauncher` (admission/quota), `SandboxLauncher` (isolation), and
+   `KagentLauncher` (needs a public RFC 8693 token-exchange endpoint first). The
+   swap mechanism is complete; these are additive comparisons.
 
 ## Open questions
 
