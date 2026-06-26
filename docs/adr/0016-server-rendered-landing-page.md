@@ -58,14 +58,18 @@ Ship a **server-rendered HTML landing page** from the existing Go server:
   logout from the header, Octicons, and dark mode (light theme only for now).
   A heavier client-side SPA remains possible later behind the same JSON API
   without touching the backend.
-- **Auto-refresh is bounded to an active pipeline.** The worklist emits a
-  `<meta http-equiv="refresh">` only while `orchestrator.Active(user)` is true at
-  render time, so once a pass settles the page is fully static (no JS, no
-  polling). A background re-rank that starts *after* the page went idle — e.g. a
-  future **cron re-ranking** — would therefore not be picked up until a manual
-  refresh. Closing that needs either an always-on slow meta-refresh when idle
-  (lean, no JS, costs a periodic full reload) or a small JS poller / SSE against
-  a status endpoint (more efficient, reintroduces `script-src`). The server data
-  is already live via `Resolve`; only the browser's re-fetch trigger is missing.
+- **The worklist renders only once the pipeline settles.** While a pass is in
+  flight (`orchestrator.Active(user)`), the page shows the *processing* view and
+  polls via `<meta http-equiv="refresh">`; the ranked list is rendered only when
+  the pipeline (last stage: llm-rank) has settled, and is then fully static (no
+  JS, no polling). So the user gets one clean transition to the final ranking
+  instead of watching a half-ranked list churn — the tradeoff is waiting for the
+  first content rather than seeing an early baseline list. A background re-rank
+  that starts *after* the page is static — e.g. a future **cron re-ranking** —
+  would not be picked up until a manual refresh. Closing that needs either an
+  always-on slow meta-refresh when idle (lean, no JS, costs a periodic full
+  reload) or a small JS poller / SSE against a status endpoint (more efficient,
+  reintroduces `script-src`). The server data is already live via `Resolve`;
+  only the browser's re-fetch trigger is missing.
 - `make vendor-primer` is the update path; bumping `PRIMER_*_VERSION` and
   re-running scoops in new Primer releases.

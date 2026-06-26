@@ -81,30 +81,40 @@ type pageData struct {
 }
 
 // Index handles GET /. It renders the sign-in view for anonymous visitors, the
-// processing view while a backfill runs, or the ranked worklist. The worklist
-// keeps auto-refreshing while the user's pipeline is still in flight so
-// enrich/llm-rank results appear without a manual refresh.
+// processing view while a pass is in flight, or the ranked worklist once it
+// settles.
 func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
+	data, status := h.view(r)
+	h.render(w, status, data)
+}
+
+// view selects what to render. The worklist is shown only once the user's
+// pipeline has settled — its last stage is llm-rank — so the user gets one clean
+// transition to the final ranking instead of watching a half-ranked list churn
+// (docs/adr/0016). While a pass is active the processing view polls via a meta
+// refresh; the settled worklist is static.
+func (h *Handler) view(r *http.Request) (pageData, int) {
 	user := h.sessions.CurrentUser(r)
 	if user == nil {
-		h.render(w, http.StatusOK, pageData{View: "signin", Providers: h.providers.Providers()})
-		return
+		return pageData{View: "signin", Providers: h.providers.Providers()}, http.StatusOK
+	}
+
+	// A pass is running: keep showing processing and polling until it completes,
+	// rather than rendering an intermediate (e.g. only-ingested) list.
+	if h.pipeline.Active(user.ID) {
+		return pageData{View: "processing", User: user, RefreshSecs: 3}, http.StatusOK
 	}
 
 	status, items, err := worklist.Resolve(r.Context(), h.store, h.pipeline, h.now(), user.ID, worklist.DefaultSort, true)
 	if err != nil {
-		h.render(w, http.StatusBadGateway, pageData{View: "error", User: user})
-		return
+		return pageData{View: "error", User: user}, http.StatusBadGateway
 	}
 	if status == worklist.StatusProcessing {
-		h.render(w, http.StatusOK, pageData{View: "processing", User: user, RefreshSecs: 3})
-		return
+		// Was empty; Resolve kicked off a backfill. Poll until it settles.
+		return pageData{View: "processing", User: user, RefreshSecs: 3}, http.StatusOK
 	}
-	refresh := 0
-	if h.pipeline.Active(user.ID) {
-		refresh = 5 // enrich/llm-rank still running; refresh until it settles
-	}
-	h.render(w, http.StatusOK, pageData{View: "worklist", User: user, Items: items, RefreshSecs: refresh})
+	// Settled: the final ranked list, rendered once and left static.
+	return pageData{View: "worklist", User: user, Items: items}, http.StatusOK
 }
 
 // Hide handles POST /items/hide. It marks the given item hidden for the signed-in
