@@ -52,6 +52,21 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Preserve any prior "hidden" state across re-ingest, auto-unhiding an item
+	// once GitHub shows it changed after it was hidden (docs/adr/0017). Reading
+	// the existing items here is the merge point for that user-set metadata.
+	existing, err := h.store.List(r.Context(), p.ActingUserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load work items")
+		return
+	}
+	prevHidden := make(map[string]time.Time, len(existing))
+	for _, it := range existing {
+		if !it.Meta.HiddenAt.IsZero() {
+			prevHidden[it.ID] = it.Meta.HiddenAt
+		}
+	}
+
 	now := time.Now().UTC()
 	for i := range req.Items {
 		// Multi-tenant isolation: an agent only ever writes for its acting user.
@@ -60,6 +75,8 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		req.Items[i].Meta.Origin = worklist.OriginAgent
 		// Decorate ZZ metadata by scoring the item's signals (docs/adr/0008).
 		req.Items[i].Meta = worklist.Score(req.Items[i], now)
+		// Carry (or auto-clear) the user's hidden state (docs/adr/0017).
+		req.Items[i].Meta.HiddenAt = worklist.HiddenAfter(prevHidden[req.Items[i].ID], req.Items[i].GitHub.UpdatedAt)
 		if req.Items[i].CreatedAt.IsZero() {
 			req.Items[i].CreatedAt = now
 		}

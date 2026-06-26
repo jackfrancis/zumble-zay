@@ -21,3 +21,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0014](0014-axis-ranker-openai-compatible-client.md) | The AxisRanker uses an OpenAI-compatible chat-completions client (Copilot default) | Accepted |
 | [0015](0015-llm-axes-authoritative.md) | LLM axis proposals are authoritative (retire the ratify clamp and confidence floor) | Accepted |
 | [0016](0016-server-rendered-landing-page.md) | A lean server-rendered landing page styled with vendored Primer | Accepted |
+| [0017](0017-hide-user-metadata-agents-unhide.md) | Hide is user-set metadata; agents auto-unhide on change | Accepted |

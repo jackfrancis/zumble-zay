@@ -86,6 +86,11 @@ type Metadata struct {
 	Origin    string    `json:"origin"` // OriginAgent | OriginUser
 	ScoredAt  time.Time `json:"scored_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// HiddenAt is when the user hid this item; zero means visible. The user sets
+	// it; an agent clears it (auto-unhide) once the underlying GitHub item is
+	// updated after this time, so a changed item resurfaces (docs/adr/0017).
+	HiddenAt time.Time `json:"hidden_at,omitempty"`
 }
 
 // Contribution is one explainable factor in a score: a signal's signed weight

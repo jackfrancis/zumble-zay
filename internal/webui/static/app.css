@@ -36,6 +36,8 @@ a:hover { text-decoration: underline; }
   border-radius: 6px;
   margin-bottom: 12px;
 }
+.zz-item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.zz-hide { margin: 0; flex: none; }
 .zz-title { font-size: 16px; font-weight: 600; }
 .zz-meta { color: var(--fgColor-muted, #59636e); font-size: 12px; margin-top: 4px; }
 .zz-meta > * { margin-right: 6px; }

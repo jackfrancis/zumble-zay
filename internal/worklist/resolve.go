@@ -37,12 +37,34 @@ func Resolve(ctx context.Context, store Store, ingestor Ingestor, now time.Time,
 		if items[i].Meta.Origin == OriginUser {
 			continue // human overrides are preserved verbatim
 		}
+		hidden := items[i].Meta.HiddenAt // survives the rescore below
 		scored := Score(items[i], now)
 		scored.UpdatedAt = items[i].Meta.UpdatedAt // preserve persisted write time
+		scored.HiddenAt = hidden
 		items[i].Meta = scored
 	}
+	// Hidden items stay in the store (so an agent can still see and unhide them)
+	// but are dropped from the user-facing list.
+	visible := items[:0]
+	for _, it := range items {
+		if it.Meta.HiddenAt.IsZero() {
+			visible = append(visible, it)
+		}
+	}
+	items = visible
 	if err := Sort(items, key, desc); err != nil {
 		return "", nil, err
 	}
 	return StatusReady, items, nil
+}
+
+// HiddenAfter returns the HiddenAt to keep for a re-ingested item: it preserves a
+// prior hidden timestamp, but clears it (auto-unhide) when the underlying item
+// has been updated since it was hidden, so a changed item resurfaces. updatedAt
+// is the GitHub item's updated_at (docs/adr/0017).
+func HiddenAfter(prevHiddenAt, updatedAt time.Time) time.Time {
+	if prevHiddenAt.IsZero() || updatedAt.After(prevHiddenAt) {
+		return time.Time{}
+	}
+	return prevHiddenAt
 }

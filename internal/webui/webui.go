@@ -107,6 +107,37 @@ func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
 	h.render(w, http.StatusOK, pageData{View: "worklist", User: user, Items: items, RefreshSecs: refresh})
 }
 
+// Hide handles POST /items/hide. It marks the given item hidden for the signed-in
+// user, then redirects back to the list (Post/Redirect/Get). The item stays in
+// the store so an agent can later auto-unhide it when GitHub shows it changed
+// (docs/adr/0017). SameSite=Lax cookies give baseline CSRF protection for this
+// state-changing POST.
+func (h *Handler) Hide(w http.ResponseWriter, r *http.Request) {
+	user := h.sessions.CurrentUser(r)
+	if user == nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	id := r.FormValue("id")
+	if id == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	items, err := h.store.List(r.Context(), user.ID)
+	if err != nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	for _, it := range items {
+		if it.ID == id {
+			it.Meta.HiddenAt = h.now().UTC()
+			_ = h.store.Upsert(r.Context(), user.ID, it)
+			break
+		}
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func (h *Handler) render(w http.ResponseWriter, status int, data pageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)

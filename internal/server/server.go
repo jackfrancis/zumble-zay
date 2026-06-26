@@ -62,6 +62,9 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	// Landing page (server-rendered) and its static assets (docs/adr/0016).
 	mux.Handle("GET /{$}", http.HandlerFunc(webHandler.Index))
 	mux.Handle("GET /static/", webHandler.Static())
+	// Hide an item from the landing page (docs/adr/0017). The handler checks the
+	// session itself and uses Post/Redirect/Get.
+	mux.Handle("POST /items/hide", http.HandlerFunc(webHandler.Hide))
 
 	// Auth lifecycle.
 	mux.HandleFunc("GET /auth/providers", func(w http.ResponseWriter, r *http.Request) {

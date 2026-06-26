@@ -46,7 +46,13 @@
       <p class="zz-count">{{len .Items}} item{{if ne (len .Items) 1}}s{{end}} on your radar</p>
       {{range .Items}}
         <div class="zz-item">
-          <div class="zz-title"><a href="{{.GitHub.URL}}" target="_blank" rel="noopener noreferrer">{{.GitHub.Title}}</a></div>
+          <div class="zz-item-head">
+            <div class="zz-title"><a href="{{.GitHub.URL}}" target="_blank" rel="noopener noreferrer">{{.GitHub.Title}}</a></div>
+            <form class="zz-hide" method="post" action="/items/hide" data-confirm="Hide this item? It will return if the issue or PR changes.">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <button class="btn btn-sm" type="submit">Hide</button>
+            </form>
+          </div>
           <div class="zz-meta">
             <span>{{.GitHub.Repo}} #{{.GitHub.Number}}</span>
             <span class="Label {{priorityClass .Meta.Priority}}">{{with .Meta.Priority}}{{.}}{{else}}unranked{{end}}</span>
@@ -66,5 +72,6 @@
       {{end}}
     {{end}}
   </div>
+  <script src="/static/app.js"></script>
 </body>
 </html>
