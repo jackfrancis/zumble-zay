@@ -20,6 +20,9 @@ type InProcessLauncher struct {
 	client        *http.Client
 	log           *slog.Logger
 	ranker        worklist.AxisRanker
+	aiEndpoint    string
+	aiModel       string
+	aiToken       string
 }
 
 // NewInProcessLauncher builds a launcher that targets ZZ at zzBaseURL (a
@@ -46,6 +49,14 @@ func (l *InProcessLauncher) WithRanker(r worklist.AxisRanker) *InProcessLauncher
 	return l
 }
 
+// WithAI configures the chat-model ranker for llm-rank jobs. When the token is
+// non-empty and no explicit ranker is set, the runtime builds a chat-model
+// ranker from these values; otherwise it falls back to the StubRanker.
+func (l *InProcessLauncher) WithAI(endpoint, model, token string) *InProcessLauncher {
+	l.aiEndpoint, l.aiModel, l.aiToken = endpoint, model, token
+	return l
+}
+
 // Launch satisfies orchestrator.Launcher by running the runtime to completion.
 // It drives the same single runtime entrypoint (agent.Run) the standalone
 // cmd/runtime binary uses, so behaviour is identical across substrates; job-type
@@ -62,6 +73,9 @@ func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpe
 		Token:         token,
 		Provider:      spec.Provider,
 		Ranker:        l.ranker,
+		AIEndpoint:    l.aiEndpoint,
+		AIModel:       l.aiModel,
+		AIToken:       l.aiToken,
 	})
 	return orchestrator.Handle{Kind: "inprocess"}, err
 }

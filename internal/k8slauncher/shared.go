@@ -20,6 +20,8 @@ func runtimeEnvVars(cfg Config, spec orchestrator.JobSpec, token string) []corev
 		Token:         token,
 		Provider:      spec.Provider,
 		GitHubBaseURL: cfg.GitHubBaseURL,
+		AIEndpoint:    cfg.AIEndpoint,
+		AIModel:       cfg.AIModel,
 	})
 	envVars := make([]corev1.EnvVar, 0, len(env))
 	for k, v := range env {
@@ -29,13 +31,29 @@ func runtimeEnvVars(cfg Config, spec orchestrator.JobSpec, token string) []corev
 }
 
 // runtimeContainer is the single runtime container every substrate launcher
-// runs; only the surrounding workload (Job, Pod, ...) differs.
+// runs; only the surrounding workload (Job, Pod, ...) differs. The ranking
+// model token, when configured, is injected by Secret reference so it never
+// appears as a plain value in the workload spec.
 func runtimeContainer(cfg Config, spec orchestrator.JobSpec, token string) corev1.Container {
+	env := runtimeEnvVars(cfg, spec, token)
+	if cfg.AITokenSecretName != "" {
+		optional := true
+		env = append(env, corev1.EnvVar{
+			Name: agent.EnvAIToken,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: cfg.AITokenSecretName},
+					Key:                  cfg.AITokenSecretKey,
+					Optional:             &optional,
+				},
+			},
+		})
+	}
 	return corev1.Container{
 		Name:            "runtime",
 		Image:           cfg.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Env:             runtimeEnvVars(cfg, spec, token),
+		Env:             env,
 	}
 }
 

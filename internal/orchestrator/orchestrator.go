@@ -129,7 +129,12 @@ const (
 	// anyway. Too tight a deadline cancels the job mid-flight, discards its work,
 	// and breaks the pipeline chain.
 	defaultJobTTL = 2 * time.Minute
-	queueDepth    = 128
+	// defaultRankJobTTL is the llm-rank budget. That stage makes one slow
+	// chat-model call per shortlisted item (seconds each, more with adaptive
+	// thinking), so it needs more headroom than the bounded GitHub fan-outs; a
+	// full pass otherwise approaches the general deadline.
+	defaultRankJobTTL = 5 * time.Minute
+	queueDepth        = 128
 )
 
 // Orchestrator accepts ingestion requests and supervises agent runtimes.
@@ -298,9 +303,19 @@ func (o *Orchestrator) safeLaunch(spec JobSpec, token string) (handle Handle, er
 			err = fmt.Errorf("launcher panicked: %v", rec)
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), o.jobTTL)
+	ctx, cancel := context.WithTimeout(context.Background(), o.deadlineFor(spec.Type))
 	defer cancel()
 	return o.launcher.Launch(ctx, spec, token)
+}
+
+// deadlineFor returns the execution budget for a job type. The llm-rank stage
+// calls a slow chat model once per shortlisted item, so it gets more headroom
+// than the bounded GitHub API fan-outs. A larger configured jobTTL still wins.
+func (o *Orchestrator) deadlineFor(t JobType) time.Duration {
+	if t == JobLLMRank && o.jobTTL < defaultRankJobTTL {
+		return defaultRankJobTTL
+	}
+	return o.jobTTL
 }
 
 // nextStage returns the capability that follows t in the ingestion pipeline.

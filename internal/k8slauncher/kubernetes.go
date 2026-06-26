@@ -28,6 +28,14 @@ type Config struct {
 	GitHubBaseURL  string // optional GitHub API base override
 	ServiceAccount string // optional ServiceAccount for the runtime pod
 	TTLAfterFinish int32  // ttlSecondsAfterFinished for completed Jobs
+	// Ranking model wiring forwarded to the runtime (docs/adr/0011). Endpoint and
+	// model are non-secret and ride the plain injection contract; the token is a
+	// secret, injected by reference (AITokenSecretName/Key) rather than as a plain
+	// env value, so it never appears in the Job spec.
+	AIEndpoint        string
+	AIModel           string
+	AITokenSecretName string
+	AITokenSecretKey  string
 }
 
 // KubernetesJobLauncher runs each agent job as a batch/v1 Job and watches it to

@@ -9,7 +9,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/agent"
 )
@@ -25,7 +24,7 @@ func main() {
 
 	log.Info("runtime starting", "job_type", p.JobType, "provider", p.Provider, "base_url", p.BaseURL)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), agent.JobTimeout(p.JobType))
 	defer cancel()
 	if err := agent.Run(ctx, p); err != nil {
 		log.Error("runtime failed", "job_type", p.JobType, "err", err)

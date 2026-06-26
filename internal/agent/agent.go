@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/github"
+	"github.com/jackfrancis/zumble-zay/internal/llm"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
@@ -33,6 +34,9 @@ type RunParams struct {
 	Provider      string              // e.g. "github"
 	EnrichLimit   int                 // max items to enrich per run; 0 uses the default
 	Ranker        worklist.AxisRanker // axis ranker for llm-rank jobs; nil uses the stub
+	AIEndpoint    string              // chat-completions URL for the llm-rank ranker
+	AIModel       string              // ranking model id; empty uses the llm default
+	AIToken       string              // bearer token for the ranking model; empty falls back to the stub
 }
 
 // Runtime job types. These values are the contract between the orchestrator
@@ -43,6 +47,24 @@ const (
 	JobEnrich = "github-enrich"
 	JobRank   = "llm-rank"
 )
+
+// Runtime job budgets. The llm-rank job makes one slow chat-model call per
+// shortlisted item, so it needs more wall clock than the bounded GitHub stages.
+const (
+	defaultJobTimeout = 2 * time.Minute
+	rankJobTimeout    = 5 * time.Minute
+)
+
+// JobTimeout returns the wall-clock budget a standalone runtime should allow for
+// a job of the given type (cmd/runtime applies it). The in-process path is
+// bounded by the orchestrator's per-stage deadline instead; the two are kept in
+// step so a job has the same budget on either substrate.
+func JobTimeout(jobType string) time.Duration {
+	if jobType == JobRank {
+		return rankJobTimeout
+	}
+	return defaultJobTimeout
+}
 
 // Run is the single runtime entrypoint: it executes the job selected by
 // p.JobType. The in-process launcher and the standalone cmd/runtime binary both
@@ -58,6 +80,26 @@ func Run(ctx context.Context, p RunParams) error {
 		return runIngest(ctx, p)
 	default:
 		return fmt.Errorf("agent: unknown job type %q", p.JobType)
+	}
+}
+
+// rankerFor selects the AxisRanker for a rank job: an explicitly injected ranker
+// wins (tests, or the in-process WithRanker seam); otherwise a chat-model ranker
+// is built when an AI token is configured; otherwise the deterministic stub
+// keeps the pipeline exercisable with no model attached (docs/adr/0011).
+func rankerFor(p RunParams) worklist.AxisRanker {
+	switch {
+	case p.Ranker != nil:
+		return p.Ranker
+	case p.AIToken != "":
+		return llm.NewRanker(llm.Config{
+			Endpoint: p.AIEndpoint,
+			Model:    p.AIModel,
+			Token:    p.AIToken,
+			Client:   p.Client,
+		})
+	default:
+		return worklist.NewStubRanker()
 	}
 }
 
@@ -95,6 +137,12 @@ const defaultEnrichLimit = 50
 // enrichConcurrency bounds how many per-item timeline calls run at once, so the
 // fan-out finishes quickly without overrunning the job deadline.
 const enrichConcurrency = 8
+
+// rankConcurrency bounds how many per-item ranking calls run at once. A chat
+// model is slow (seconds per call, more with adaptive thinking), so ranking the
+// shortlist sequentially would exceed the job deadline; this fans the calls out
+// while staying friendly to provider rate limits.
+const rankConcurrency = 8
 
 func enrichLimit(n int) int {
 	if n <= 0 {
@@ -179,26 +227,40 @@ func runRank(ctx context.Context, p RunParams) error {
 	if p.Client == nil {
 		p.Client = &http.Client{Timeout: 30 * time.Second}
 	}
-	ranker := p.Ranker
-	if ranker == nil {
-		ranker = worklist.NewStubRanker()
-	}
+	ranker := rankerFor(p)
 	zz := NewZZClient(p.BaseURL, p.Token, p.Client)
 
 	items, err := zz.ListWorklist(ctx, enrichLimit(p.EnrichLimit))
 	if err != nil {
 		return fmt.Errorf("list worklist: %w", err)
 	}
-	var changed []worklist.WorkItem
+	// Propose axes per item with bounded concurrency: a chat model is slow, so
+	// ranking the shortlist one item at a time would exceed the job deadline
+	// (the failure mode the sequential version hit). Only items that received a
+	// proposal are written back; a failed call leaves the item unchanged.
+	var (
+		mu      sync.Mutex
+		changed []worklist.WorkItem
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, rankConcurrency)
+	)
 	for i := range items {
-		prop, err := ranker.Propose(ctx, items[i])
-		if err != nil {
-			continue // best-effort: leave the item without a proposal
-		}
-		proposal := prop
-		items[i].Signals.Proposed = &proposal
-		changed = append(changed, items[i])
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			prop, err := ranker.Propose(ctx, items[i])
+			if err != nil {
+				return // best-effort: leave the item without a proposal
+			}
+			items[i].Signals.Proposed = &prop
+			mu.Lock()
+			changed = append(changed, items[i])
+			mu.Unlock()
+		}(i)
 	}
+	wg.Wait()
 	if len(changed) == 0 {
 		return nil
 	}

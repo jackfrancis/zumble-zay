@@ -16,6 +16,13 @@ const (
 	EnvProvider      = "ZZ_PROVIDER"
 	EnvGitHubBaseURL = "ZZ_GITHUB_BASE_URL"
 	EnvEnrichLimit   = "ZZ_ENRICH_LIMIT"
+	EnvAIEndpoint    = "ZZ_AI_ENDPOINT"
+	EnvAIModel       = "ZZ_AI_MODEL"
+	// EnvAIToken carries the ranking model's bearer token. Unlike the other
+	// variables it is NOT emitted by Env: it is a secret, so a launcher injects
+	// it out-of-band (the Kubernetes launcher via a Secret reference), and only
+	// ParamsFromEnv reads it back. In-process the token rides RunParams directly.
+	EnvAIToken = "ZZ_AI_TOKEN"
 )
 
 // Env encodes the serializable parameters of a runtime invocation into the
@@ -38,6 +45,12 @@ func Env(p RunParams) map[string]string {
 	if p.EnrichLimit > 0 {
 		env[EnvEnrichLimit] = strconv.Itoa(p.EnrichLimit)
 	}
+	if p.AIEndpoint != "" {
+		env[EnvAIEndpoint] = p.AIEndpoint
+	}
+	if p.AIModel != "" {
+		env[EnvAIModel] = p.AIModel
+	}
 	return env
 }
 
@@ -51,6 +64,9 @@ func ParamsFromEnv(getenv func(string) string) (RunParams, error) {
 		Token:         getenv(EnvToken),
 		Provider:      getenv(EnvProvider),
 		GitHubBaseURL: getenv(EnvGitHubBaseURL),
+		AIEndpoint:    getenv(EnvAIEndpoint),
+		AIModel:       getenv(EnvAIModel),
+		AIToken:       getenv(EnvAIToken),
 	}
 	if v := getenv(EnvEnrichLimit); v != "" {
 		n, err := strconv.Atoi(v)

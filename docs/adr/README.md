@@ -18,3 +18,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0011](0011-llm-produced-axes-zz-blends.md) | The four ranking axes are LLM-produced; ZZ blends and ratifies | Accepted |
 | [0012](0012-kubernetes-native-substrates-swappable.md) | Kubernetes-native agent substrates are swappable behind a runtime artifact | Accepted |
 | [0013](0013-stay-on-github-oauth-app.md) | ZZ stays on the GitHub OAuth App (GitHub Apps can't serve a cross-org radar) | Accepted |
+| [0014](0014-axis-ranker-openai-compatible-client.md) | The AxisRanker uses an OpenAI-compatible chat-completions client (Copilot default) | Accepted |

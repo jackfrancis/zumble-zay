@@ -24,6 +24,21 @@ type Config struct {
 	// consumed only by substrate launchers (e.g. the Kubernetes Job launcher);
 	// the in-process launcher ignores it.
 	Runtime RuntimeConfig
+	// AI configures the chat-model ranker used by llm-rank jobs (docs/adr/0011).
+	AI AIConfig
+}
+
+// AIConfig configures the AxisRanker's chat model. The endpoint speaks the
+// OpenAI-compatible chat-completions API, so any such provider works; empty
+// endpoint/model fall back to the llm package defaults (GitHub Copilot + the
+// default model). The token is a secret: the in-process path reads it directly,
+// while the Kubernetes path injects it into the runtime via a Secret reference.
+type AIConfig struct {
+	Endpoint        string
+	Model           string
+	Token           string
+	TokenSecretName string
+	TokenSecretKey  string
 }
 
 // RuntimeConfig configures the out-of-process agent runtime: the image to run
@@ -87,6 +102,13 @@ func Load() (*Config, error) {
 			Image:          getEnv("RUNTIME_IMAGE", "localhost/zumble-zay-runtime:dev"),
 			ZZBaseURL:      getEnv("RUNTIME_ZZ_BASE_URL", "http://zumble-zay:8080"),
 			ServiceAccount: os.Getenv("RUNTIME_SERVICE_ACCOUNT"),
+		},
+		AI: AIConfig{
+			Endpoint:        os.Getenv("AI_ENDPOINT"),
+			Model:           os.Getenv("AI_MODEL"),
+			Token:           os.Getenv("AI_TOKEN"),
+			TokenSecretName: getEnv("AI_TOKEN_SECRET_NAME", "zumble-zay-secrets"),
+			TokenSecretKey:  getEnv("AI_TOKEN_SECRET_KEY", "AI_TOKEN"),
 		},
 	}
 

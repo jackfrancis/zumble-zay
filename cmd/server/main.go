@@ -89,7 +89,8 @@ func selectLauncher(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher
 	switch cfg.Launcher {
 	case "inprocess":
 		log.Info("using in-process launcher")
-		return agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log), nil
+		return agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log).
+			WithAI(cfg.AI.Endpoint, cfg.AI.Model, cfg.AI.Token), nil
 	case "k8s-job":
 		cs, err := inClusterClientset()
 		if err != nil {
@@ -130,9 +131,13 @@ func inClusterClientset() (*kubernetes.Clientset, error) {
 // config shared by the Job and Pod launchers.
 func runtimeLauncherConfig(cfg *config.Config) k8slauncher.Config {
 	return k8slauncher.Config{
-		Namespace:      cfg.Runtime.Namespace,
-		Image:          cfg.Runtime.Image,
-		ZZBaseURL:      cfg.Runtime.ZZBaseURL,
-		ServiceAccount: cfg.Runtime.ServiceAccount,
+		Namespace:         cfg.Runtime.Namespace,
+		Image:             cfg.Runtime.Image,
+		ZZBaseURL:         cfg.Runtime.ZZBaseURL,
+		ServiceAccount:    cfg.Runtime.ServiceAccount,
+		AIEndpoint:        cfg.AI.Endpoint,
+		AIModel:           cfg.AI.Model,
+		AITokenSecretName: cfg.AI.TokenSecretName,
+		AITokenSecretKey:  cfg.AI.TokenSecretKey,
 	}
 }

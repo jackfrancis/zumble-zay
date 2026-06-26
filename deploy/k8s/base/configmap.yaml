@@ -28,3 +28,10 @@ data:
   # RUNTIME_NAMESPACE: "zumble-zay"
   # RUNTIME_ZZ_BASE_URL: "http://zumble-zay:8080"
   # RUNTIME_SERVICE_ACCOUNT: ""
+  # Ranking model for llm-rank jobs (ADR 0011/0014). The AxisRanker speaks the
+  # OpenAI-compatible chat-completions API, so any such endpoint works; the
+  # default is GitHub Copilot. The model token is a SECRET (key AI_TOKEN in
+  # zumble-zay-secrets); without it the ranker falls back to the deterministic
+  # StubRanker (no external calls).
+  AI_ENDPOINT: "https://api.githubcopilot.com/chat/completions"
+  AI_MODEL: "claude-opus-4.8"
