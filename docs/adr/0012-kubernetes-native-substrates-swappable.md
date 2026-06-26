@@ -52,10 +52,15 @@ Make substrates **swappable by configuration** behind three stable artifacts:
    (`ZZ_JOB_TYPE`, `ZZ_PROVIDER`, `ZZ_ACTING_USER`, `ZZ_JOB_ID`) — so every
    launcher injects identically and the runtime is launcher-agnostic.
 3. **The `Launcher` is selected at deploy time by configuration**
-   (`LAUNCHER=inprocess|k8s-job|kagent|sandbox|...`), and its interface is
-   enriched to return a workload **handle** and surface **status/logs** plus
+   (`LAUNCHER=inprocess|k8s-job|pod|kagent|kueue|sandbox|...`), and its interface
+   is enriched to return a workload **handle** and surface **status/logs** plus
    accept substrate config — so swapping substrates and observing them is a
-   config change, not a code change.
+   config change, not a code change. The substrate-neutral abstraction lives in
+   the `Launcher` **interface**; each concrete launcher is named for the
+   substrate/resource it creates (`KubernetesJobLauncher`,
+   `KubernetesPodLauncher`, `KagentLauncher`, `KueueLauncher`, `SandboxLauncher`),
+   not a catch-all `WorkloadLauncher` — so per-substrate behaviour stays
+   comparable rather than hidden behind one type with an internal switch.
 
 ZZ core continues to import no provider/model client and no Kubernetes client;
 the Kubernetes API client lives behind a `Launcher` implementation, keeping the
@@ -92,9 +97,15 @@ Each step is additive and independently shippable; none touches ZZ core.
    keep `InProcessLauncher` conformant.
 4. **Orchestrator Kubernetes identity.** client-go + ServiceAccount + RBAC
    (create Jobs in a namespace), behind the `Launcher` seam.
-5. **Reference `KubernetesJobLauncher`.** A `batch/v1` Job running the runtime
-   image, token/URL injected, watched to completion; proven in the kind cluster.
+5. **Reference `KubernetesJobLauncher`.** The first per-substrate launcher,
+   named for the resource it creates (not as *the* Kubernetes launcher): a
+   `batch/v1` Job — chosen for completion tracking, retry/backoff, and
+   `ttlSecondsAfterFinished`, and as the Kueue-admissible unit — running the
+   runtime image, token/URL injected, watched to completion; proven in the kind
+   cluster.
 6. **Config-driven launcher selection** (`LAUNCHER=...`) — the swap mechanism.
-7. **Novel substrates** (kagent, agent-sandbox, custom) as additional
-   `Launcher` implementations, each selectable by config; compare lifecycle,
-   isolation, identity, and cost.
+7. **Novel substrates as sibling launchers**, each named for its substrate and
+   selectable by config — `KubernetesPodLauncher`, `KagentLauncher`,
+   `KueueLauncher`, `SandboxLauncher`, custom — to compare lifecycle, isolation,
+   identity, and cost. (Kueue's admission unit is a `Workload` CRD, so it is its
+   own launcher rather than a reason to genericize the others.)
