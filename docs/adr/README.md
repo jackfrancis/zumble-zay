@@ -16,3 +16,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0009](0009-agent-runtime-contract-boundary.md) | The agent runtime contract is the substrate-neutral boundary | Accepted |
 | [0010](0010-agent-runtimes-capability-scoped.md) | Agent runtimes are capability-scoped, not per-call | Accepted |
 | [0011](0011-llm-produced-axes-zz-blends.md) | The four ranking axes are LLM-produced; ZZ blends and ratifies | Accepted |
+| [0012](0012-kubernetes-native-substrates-swappable.md) | Kubernetes-native agent substrates are swappable behind a runtime artifact | Accepted |
