@@ -48,9 +48,12 @@ Make substrates **swappable by configuration** behind three stable artifacts:
    container image. `InProcessLauncher` drives the *same* entrypoint in-process,
    proving "one runtime, many launchers."
 2. **A runtime injection contract.** A runtime receives everything via a fixed
-   environment convention — `ZZ_BASE_URL`, `ZZ_JOB_TOKEN`, and the job spec
-   (`ZZ_JOB_TYPE`, `ZZ_PROVIDER`, `ZZ_ACTING_USER`, `ZZ_JOB_ID`) — so every
-   launcher injects identically and the runtime is launcher-agnostic.
+   environment convention — `ZZ_BASE_URL`, `ZZ_JOB_TOKEN`, `ZZ_JOB_TYPE`,
+   `ZZ_PROVIDER` (and optional `ZZ_GITHUB_BASE_URL`, `ZZ_ENRICH_LIMIT`) — so
+   every launcher injects identically and the runtime is launcher-agnostic. The
+   acting user and job id ride inside the signed token, not the environment. The
+   encode (launcher: `agent.Env`) and decode (runtime: `agent.ParamsFromEnv`)
+   halves live together so they cannot drift.
 3. **The `Launcher` is selected at deploy time by configuration**
    (`LAUNCHER=inprocess|k8s-job|pod|kagent|kueue|sandbox|...`), and its interface
    is enriched to return a workload **handle** and surface **status/logs** plus

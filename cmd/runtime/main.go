@@ -9,7 +9,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/agent"
@@ -18,21 +17,9 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	p := agent.RunParams{
-		JobType:       os.Getenv("ZZ_JOB_TYPE"),
-		BaseURL:       os.Getenv("ZZ_BASE_URL"),
-		Token:         os.Getenv("ZZ_JOB_TOKEN"),
-		Provider:      os.Getenv("ZZ_PROVIDER"),
-		GitHubBaseURL: os.Getenv("ZZ_GITHUB_BASE_URL"),
-	}
-	if v := os.Getenv("ZZ_ENRICH_LIMIT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			p.EnrichLimit = n
-		}
-	}
-	if p.BaseURL == "" || p.Token == "" || p.JobType == "" {
-		log.Error("missing required runtime configuration",
-			"need", "ZZ_BASE_URL, ZZ_JOB_TOKEN, ZZ_JOB_TYPE")
+	p, err := agent.ParamsFromEnv(os.Getenv)
+	if err != nil {
+		log.Error("invalid runtime configuration", "err", err)
 		os.Exit(2)
 	}
 
