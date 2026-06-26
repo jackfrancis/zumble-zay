@@ -150,6 +150,13 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    `KueueLauncher` (admission/quota), `SandboxLauncher` (isolation), and
    `KagentLauncher` (needs a public RFC 8693 token-exchange endpoint first). The
    swap mechanism is complete; these are additive comparisons.
+7. **Prompt & context tuning is now the primary correctness lever (ADR 0015).**
+   The LLM is authoritative for the four axes, so ranking quality is steered in
+   `internal/llm/prompt.go` — sharper axis definitions, the user's priorities and
+   role, repo strategic tiers, calibration examples — not by numeric guardrails.
+   Feeding richer per-item context (issue/PR bodies, recent comments) raises the
+   ceiling but is coupled to the deferred discovery/injection design (ADR 0015),
+   since that content is the attacker-controllable surface.
 
 ## Open questions
 
