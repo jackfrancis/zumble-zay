@@ -1,6 +1,6 @@
 .PHONY: build run test tidy vet fmt clean image image-save kind-load engine \
         cluster-up cluster-down dev-up dev-down dev-forward dev-logs \
-        build-runtime image-runtime
+        build-runtime image-runtime image-runtime-save kind-load-runtime
 
 BIN := bin/server
 
@@ -48,7 +48,7 @@ fmt:
 	gofmt -l -w .
 
 clean:
-	rm -rf bin zumble-zay-image.tar
+	rm -rf bin zumble-zay-image.tar zumble-zay-runtime-image.tar
 
 # Print the detected container engine.
 engine:
@@ -72,6 +72,17 @@ image-save: image
 kind-load: image-save
 	kind load image-archive zumble-zay-image.tar --name $(KIND_CLUSTER)
 	rm -f zumble-zay-image.tar
+
+# Export the runtime image to a portable archive (docs/adr/0012).
+image-runtime-save: image-runtime
+	$(CONTAINER_ENGINE) save $(RUNTIME_IMAGE) -o zumble-zay-runtime-image.tar
+
+# Load the standalone runtime image into kind so KubernetesJobLauncher Jobs
+# resolve it without a registry pull (same engine-agnostic archive path as
+# kind-load). Run this before exercising LAUNCHER=k8s-job (docs/adr/0012).
+kind-load-runtime: image-runtime-save
+	kind load image-archive zumble-zay-runtime-image.tar --name $(KIND_CLUSTER)
+	rm -f zumble-zay-runtime-image.tar
 
 # Create the kind cluster if it does not already exist.
 cluster-up:

@@ -23,7 +23,9 @@ writes are **designed but not built**.
 
 ## Tech & layout
 
-- Go 1.25. Only third-party dependency: `golang.org/x/oauth2`.
+- Go 1.25. Third-party deps: `golang.org/x/oauth2` (auth) and `k8s.io/client-go`
+  (the `k8s-job` launcher only — compiled into the **server**, never the agent
+  runtime; see ADR 0012).
 - Module: `github.com/jackfrancis/zumble-zay`.
 
 ```

@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,8 +13,13 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"github.com/jackfrancis/zumble-zay/internal/agent"
 	"github.com/jackfrancis/zumble-zay/internal/config"
+	"github.com/jackfrancis/zumble-zay/internal/k8slauncher"
+	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 	"github.com/jackfrancis/zumble-zay/internal/server"
 )
 
@@ -26,9 +32,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The in-process agent launcher reaches ZZ over loopback using the same HTTP
-	// contract a future out-of-process Pod will use (docs/adr/0007).
-	launcher := agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log)
+	launcher, err := selectLauncher(cfg, log)
+	if err != nil {
+		log.Error("launcher setup failed", "err", err)
+		os.Exit(1)
+	}
 	handler, cleanup := server.New(cfg, log, launcher)
 	defer cleanup()
 
@@ -70,4 +78,39 @@ func loopbackBaseURL(addr string) string {
 		return "http://127.0.0.1" + addr
 	}
 	return "http://" + addr
+}
+
+// selectLauncher builds the agent launcher chosen by the LAUNCHER env var. The
+// default in-process launcher reaches ZZ over loopback (docs/adr/0007); the
+// k8s-job launcher runs each agent job as a Kubernetes Job (docs/adr/0012).
+func selectLauncher(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) {
+	switch os.Getenv("LAUNCHER") {
+	case "k8s-job":
+		restCfg, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("in-cluster config: %w", err)
+		}
+		cs, err := kubernetes.NewForConfig(restCfg)
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes client: %w", err)
+		}
+		lc := k8slauncher.Config{
+			Namespace:      envOr("RUNTIME_NAMESPACE", "zumble-zay"),
+			Image:          envOr("RUNTIME_IMAGE", "localhost/zumble-zay-runtime:dev"),
+			ZZBaseURL:      envOr("RUNTIME_ZZ_BASE_URL", "http://zumble-zay:8080"),
+			ServiceAccount: os.Getenv("RUNTIME_SERVICE_ACCOUNT"),
+		}
+		log.Info("using kubernetes-job launcher", "namespace", lc.Namespace, "image", lc.Image, "zz_base_url", lc.ZZBaseURL)
+		return k8slauncher.New(cs, lc), nil
+	default:
+		log.Info("using in-process launcher")
+		return agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log), nil
+	}
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

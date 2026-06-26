@@ -253,9 +253,7 @@ func (o *Orchestrator) run(id string) {
 	})
 	var handle Handle
 	if err == nil {
-		ctx, cancel := context.WithTimeout(context.Background(), o.jobTTL)
-		handle, err = o.launcher.Launch(ctx, spec, token)
-		cancel()
+		handle, err = o.safeLaunch(spec, token)
 	}
 
 	o.mu.Lock()
@@ -287,6 +285,22 @@ func (o *Orchestrator) run(id string) {
 			}
 		}
 	}
+}
+
+// safeLaunch invokes the launcher with the per-job deadline, converting a
+// launcher panic into an ordinary job failure. A launcher runs substrate code
+// (a client library, a nil dereference) outside the request goroutine, so
+// without this a panic would crash the whole server rather than failing one
+// job — recoverer only guards request goroutines.
+func (o *Orchestrator) safeLaunch(spec JobSpec, token string) (handle Handle, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("launcher panicked: %v", rec)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), o.jobTTL)
+	defer cancel()
+	return o.launcher.Launch(ctx, spec, token)
 }
 
 // nextStage returns the capability that follows t in the ingestion pipeline.

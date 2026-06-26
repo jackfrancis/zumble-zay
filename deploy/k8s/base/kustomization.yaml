@@ -7,6 +7,8 @@ namespace: zumble-zay
 # zumble-zay-secrets Secret out-of-band (see that file's header).
 resources:
   - namespace.yaml
+  - serviceaccount.yaml
+  - rbac.yaml
   - configmap.yaml
   - deployment.yaml
   - service.yaml

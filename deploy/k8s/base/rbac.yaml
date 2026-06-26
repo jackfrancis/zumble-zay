@@ -1,0 +1,26 @@
+# The orchestrator (running in the server pod) creates and watches runtime Jobs
+# when LAUNCHER=k8s-job (docs/adr/0012). Least privilege: namespaced, jobs plus
+# read-only pods (for status/logs), nothing cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zumble-zay-launcher
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zumble-zay-launcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: zumble-zay-launcher
+subjects:
+  - kind: ServiceAccount
+    name: zumble-zay
