@@ -59,11 +59,21 @@ type JobSpec struct {
 	ActingUserID string
 }
 
-// Launcher executes a runtime for a job and returns when it completes. The
-// in-process launcher runs the agent inline; a future Kubernetes launcher will
-// create a Pod and watch it to completion behind this same interface.
+// Handle identifies a launched workload and where it ran, so the orchestrator
+// can observe and (later) reconcile it against the substrate (docs/adr/0012).
+// For a synchronous launcher the terminal outcome is the Launch error; the
+// Handle adds the workload's identity/location.
+type Handle struct {
+	Kind string // launcher kind, e.g. "inprocess", "k8s-job"
+	Ref  string // substrate-specific id (Pod/Job name); empty in-process
+}
+
+// Launcher executes a runtime for a job, returning a Handle describing where it
+// ran. The in-process launcher runs the agent inline and returns on completion;
+// a future Kubernetes launcher creates a Pod/Job and watches it to completion
+// behind this same interface (docs/adr/0009, 0012).
 type Launcher interface {
-	Launch(ctx context.Context, spec JobSpec, token string) error
+	Launch(ctx context.Context, spec JobSpec, token string) (Handle, error)
 }
 
 // NoopLauncher succeeds without doing anything. It is the default when no
@@ -71,7 +81,9 @@ type Launcher interface {
 type NoopLauncher struct{}
 
 // Launch does nothing and succeeds.
-func (NoopLauncher) Launch(context.Context, JobSpec, string) error { return nil }
+func (NoopLauncher) Launch(context.Context, JobSpec, string) (Handle, error) {
+	return Handle{Kind: "noop"}, nil
+}
 
 // Job is the tracked lifecycle record for one unit of agent work.
 type Job struct {
@@ -80,6 +92,7 @@ type Job struct {
 	Provider     string
 	ActingUserID string
 	State        JobState
+	Handle       Handle // where the workload ran (substrate observability)
 	Err          string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -238,13 +251,15 @@ func (o *Orchestrator) run(id string) {
 		JobID:        job.ID,
 		Provider:     pol.provider,
 	})
+	var handle Handle
 	if err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), o.jobTTL)
-		err = o.launcher.Launch(ctx, spec, token)
+		handle, err = o.launcher.Launch(ctx, spec, token)
 		cancel()
 	}
 
 	o.mu.Lock()
+	job.Handle = handle
 	if err != nil {
 		job.State = StateFailed
 		job.Err = err.Error()

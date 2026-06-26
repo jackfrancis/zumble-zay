@@ -50,11 +50,11 @@ func (l *InProcessLauncher) WithRanker(r worklist.AxisRanker) *InProcessLauncher
 // It drives the same single runtime entrypoint (agent.Run) the standalone
 // cmd/runtime binary uses, so behaviour is identical across substrates; job-type
 // dispatch lives in agent.Run (docs/adr/0012).
-func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpec, token string) error {
+func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpec, token string) (orchestrator.Handle, error) {
 	if l.log != nil {
 		l.log.Info("agent runtime starting", "job", spec.JobID, "type", spec.Type, "provider", spec.Provider)
 	}
-	return Run(ctx, RunParams{
+	err := Run(ctx, RunParams{
 		JobType:       string(spec.Type),
 		BaseURL:       l.zzBaseURL,
 		GitHubBaseURL: l.githubBaseURL,
@@ -63,4 +63,5 @@ func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpe
 		Provider:      spec.Provider,
 		Ranker:        l.ranker,
 	})
+	return orchestrator.Handle{Kind: "inprocess"}, err
 }

@@ -24,13 +24,13 @@ type blockingLauncher struct {
 	tokens []string
 }
 
-func (b *blockingLauncher) Launch(_ context.Context, spec orchestrator.JobSpec, token string) error {
+func (b *blockingLauncher) Launch(_ context.Context, spec orchestrator.JobSpec, token string) (orchestrator.Handle, error) {
 	b.mu.Lock()
 	b.tokens = append(b.tokens, token)
 	b.mu.Unlock()
 	b.started <- spec
 	<-b.release
-	return nil
+	return orchestrator.Handle{Kind: "blocking", Ref: spec.JobID}, nil
 }
 
 func (b *blockingLauncher) lastToken() string {
@@ -92,6 +92,11 @@ func TestEnsureBackfillDedupesAndMintsScopedToken(t *testing.T) {
 
 	release()
 	waitState(t, o, spec.JobID, orchestrator.StateSucceeded)
+
+	// The launcher's Handle is recorded on the job for substrate observability.
+	if j, ok := o.Job(spec.JobID); !ok || j.Handle.Ref != spec.JobID || j.Handle.Kind != "blocking" {
+		t.Fatalf("job handle not recorded: %+v", j.Handle)
+	}
 }
 
 func TestLauncherErrorMarksJobFailed(t *testing.T) {
@@ -120,8 +125,8 @@ func TestLauncherErrorMarksJobFailed(t *testing.T) {
 
 type errLauncher struct{}
 
-func (errLauncher) Launch(context.Context, orchestrator.JobSpec, string) error {
-	return errors.New("boom")
+func (errLauncher) Launch(context.Context, orchestrator.JobSpec, string) (orchestrator.Handle, error) {
+	return orchestrator.Handle{}, errors.New("boom")
 }
 
 // recordingLauncher reports each launched job's type, succeeding immediately.
@@ -129,9 +134,9 @@ type recordingLauncher struct {
 	seen chan orchestrator.JobType
 }
 
-func (r *recordingLauncher) Launch(_ context.Context, spec orchestrator.JobSpec, _ string) error {
+func (r *recordingLauncher) Launch(_ context.Context, spec orchestrator.JobSpec, _ string) (orchestrator.Handle, error) {
 	r.seen <- spec.Type
-	return nil
+	return orchestrator.Handle{Kind: "recording"}, nil
 }
 
 func TestIngestSuccessChainsEnrichment(t *testing.T) {
