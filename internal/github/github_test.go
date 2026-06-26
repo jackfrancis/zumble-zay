@@ -130,44 +130,57 @@ func TestLogin(t *testing.T) {
 	}
 }
 
-func TestAwaitingMeSince(t *testing.T) {
+func TestItemActivity(t *testing.T) {
 	const me = "octocat"
-	cases := []struct {
-		name     string
-		body     string
-		wantZero bool
-	}{
-		{
-			name:     "requested and not yet reviewed",
-			body:     `[{"event":"review_requested","created_at":"2026-06-20T10:00:00Z","requested_reviewer":{"login":"octocat"}}]`,
-			wantZero: false,
-		},
-		{
-			name:     "reviewed after the request",
-			body:     `[{"event":"review_requested","created_at":"2026-06-20T10:00:00Z","requested_reviewer":{"login":"octocat"}},{"event":"reviewed","submitted_at":"2026-06-21T10:00:00Z","user":{"login":"octocat"}}]`,
-			wantZero: true,
-		},
-		{
-			name:     "requested of someone else",
-			body:     `[{"event":"review_requested","created_at":"2026-06-20T10:00:00Z","requested_reviewer":{"login":"someone-else"}}]`,
-			wantZero: true,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer srv.Close()
+	body := `[
+	  {"event":"commented","actor":{"login":"alice"}},
+	  {"event":"commented","actor":{"login":"bob"}},
+	  {"event":"commented","actor":{"login":"alice"}},
+	  {"event":"cross-referenced"},
+	  {"event":"cross-referenced"},
+	  {"event":"review_requested","created_at":"2026-06-20T10:00:00Z","requested_reviewer":{"login":"octocat"}}
+	]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
 
-			c := NewClient(srv.Client(), srv.URL)
-			at, err := c.AwaitingMeSince(context.Background(), "tok", "octo/repo", 1, me)
-			if err != nil {
-				t.Fatalf("AwaitingMeSince: %v", err)
-			}
-			if at.IsZero() != tc.wantZero {
-				t.Fatalf("zero=%v, want %v (at=%v)", at.IsZero(), tc.wantZero, at)
-			}
-		})
+	c := NewClient(srv.Client(), srv.URL)
+	act, err := c.ItemActivity(context.Background(), "tok", "octo/repo", 1, me)
+	if err != nil {
+		t.Fatalf("ItemActivity: %v", err)
+	}
+	if act.Participants != 2 {
+		t.Errorf("participants = %d, want 2", act.Participants)
+	}
+	if act.InboundRefs != 2 {
+		t.Errorf("inbound_refs = %d, want 2", act.InboundRefs)
+	}
+	if act.AwaitingMeSince.IsZero() {
+		t.Errorf("awaiting should be set (requested, not reviewed)")
+	}
+}
+
+func TestItemActivityReviewedClearsAwaiting(t *testing.T) {
+	const me = "octocat"
+	body := `[
+	  {"event":"review_requested","created_at":"2026-06-20T10:00:00Z","requested_reviewer":{"login":"octocat"}},
+	  {"event":"reviewed","submitted_at":"2026-06-21T10:00:00Z","user":{"login":"octocat"}}
+	]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL)
+	act, err := c.ItemActivity(context.Background(), "tok", "octo/repo", 1, me)
+	if err != nil {
+		t.Fatalf("ItemActivity: %v", err)
+	}
+	if !act.AwaitingMeSince.IsZero() {
+		t.Errorf("awaiting should be cleared after review, got %v", act.AwaitingMeSince)
+	}
+	if act.Participants != 1 {
+		t.Errorf("participants = %d, want 1 (the reviewer)", act.Participants)
 	}
 }

@@ -74,6 +74,19 @@ func TestScoreEngagementMonotonicAndPreservesOrigin(t *testing.T) {
 	}
 }
 
+func TestScoreUsesParticipantsAndInboundRefs(t *testing.T) {
+	now := time.Now().UTC()
+	base := Score(WorkItem{Signals: Signals{Reasons: []Reason{ReasonAuthor}, Comments: 5}}, now)
+	broad := Score(WorkItem{Signals: Signals{Reasons: []Reason{ReasonAuthor}, Comments: 5, Participants: 8}}, now)
+	if broad.Engagement <= base.Engagement {
+		t.Errorf("participants should raise engagement: base=%v broad=%v", base.Engagement, broad.Engagement)
+	}
+	hub := Score(WorkItem{Signals: Signals{Reasons: []Reason{ReasonAuthor}, InboundRefs: 6}}, now)
+	if hub.Impact == 0 {
+		t.Errorf("inbound refs should produce impact, got 0")
+	}
+}
+
 func TestScoreEmptySignalsIsInert(t *testing.T) {
 	m := Score(WorkItem{}, time.Now().UTC())
 	if m.Rank != 0 || m.Priority != PriorityNone {

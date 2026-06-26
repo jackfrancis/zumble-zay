@@ -123,32 +123,41 @@ func deadlineUrgency(due, now time.Time) float64 {
 // saturating so a runaway thread cannot dominate the blend.
 func engagementScore(s Signals, c *[]Contribution) float64 {
 	comments := saturate(float64(s.Comments), 10)
+	participants := saturate(float64(s.Participants), 8)
 	reactions := saturate(float64(s.Reactions), 20)
 	velocity := saturate(s.CommentVelocity, 5)
-	eng := math.Min(1, 0.6*comments+0.25*reactions+0.15*velocity)
+	// Breadth (distinct participants) is weighted alongside raw volume so a broad
+	// discussion outranks a two-person flame war.
+	eng := math.Min(1, 0.4*comments+0.3*participants+0.15*reactions+0.15*velocity)
 	if eng > 0 {
 		add(c, "engagement", "discussion", eng,
-			fmt.Sprintf("%d comments, %d reactions", s.Comments, s.Reactions))
+			fmt.Sprintf("%d comments from %d people, %d reactions", s.Comments, s.Participants, s.Reactions))
 	}
 	return eng
 }
 
-// impactScore: strategic importance from labels and repo tier; strongest wins.
+// impactScore: strategic importance from labels, repo tier, and hub centrality;
+// strongest wins.
 func impactScore(s Signals, c *[]Contribution) float64 {
 	var imp float64
-	var detail string
+	var detail, signal string
 	for _, l := range s.Labels {
 		if w, name := labelImpact(l); w > imp {
-			imp, detail = w, name
+			imp, detail, signal = w, name, "label"
 		}
 	}
 	if s.RepoTier > 0 {
 		if t := math.Min(1, float64(s.RepoTier)/3); t > imp {
-			imp, detail = t, "strategic repo"
+			imp, detail, signal = t, "strategic repo", "repo_tier"
+		}
+	}
+	if s.InboundRefs > 0 {
+		if r := saturate(float64(s.InboundRefs), 5); r > imp {
+			imp, detail, signal = r, fmt.Sprintf("referenced by %d items", s.InboundRefs), "inbound_refs"
 		}
 	}
 	if imp > 0 {
-		add(c, "impact", "label", imp, detail)
+		add(c, "impact", signal, imp, detail)
 	}
 	return imp
 }

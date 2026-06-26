@@ -254,43 +254,82 @@ type timelineEvent struct {
 	User *struct {
 		Login string `json:"login"`
 	} `json:"user"`
+	Actor *struct {
+		Login string `json:"login"`
+	} `json:"actor"`
 }
 
-// AwaitingMeSince reports when login was last asked to review the PR with no
-// review submitted by login since — i.e. how long it has been blocked on them.
-// A zero time means nothing is outstanding. It reads a single page of the issue
-// timeline; that is sufficient for recent review requests.
-func (c *Client) AwaitingMeSince(ctx context.Context, token, repo string, number int, login string) (time.Time, error) {
-	path := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=%d", repo, number, perPage)
-	body, err := c.get(ctx, token, path)
+// Activity holds the signals derived from a single read of an item's timeline.
+type Activity struct {
+	Participants    int       // distinct people who commented or reviewed
+	InboundRefs     int       // cross-references from other issues/PRs (hub centrality)
+	AwaitingMeSince time.Time // when login was asked to review with no review since; zero if none
+}
+
+// ItemActivity reads one page of the issue/PR timeline and derives the
+// engagement and centrality signals from it in a single call, plus how long the
+// item has been blocked on login's review.
+func (c *Client) ItemActivity(ctx context.Context, token, repo string, number int, login string) (Activity, error) {
+	events, err := c.fetchTimeline(ctx, token, repo, number)
 	if err != nil {
-		return time.Time{}, err
+		return Activity{}, err
 	}
-	var events []timelineEvent
-	if err := json.Unmarshal(body, &events); err != nil {
-		return time.Time{}, err
-	}
+	participants := make(map[string]struct{})
+	var inbound int
 	var requestedAt, reviewedAt time.Time
 	for _, e := range events {
 		switch e.Event {
+		case "commented":
+			if l := eventLogin(e); l != "" {
+				participants[l] = struct{}{}
+			}
+		case "reviewed":
+			if e.User != nil && e.User.Login != "" {
+				participants[e.User.Login] = struct{}{}
+				if e.User.Login == login {
+					at := e.SubmittedAt
+					if at.IsZero() {
+						at = e.CreatedAt
+					}
+					if at.After(reviewedAt) {
+						reviewedAt = at
+					}
+				}
+			}
+		case "cross-referenced":
+			inbound++
 		case "review_requested":
 			if e.RequestedReviewer != nil && e.RequestedReviewer.Login == login && e.CreatedAt.After(requestedAt) {
 				requestedAt = e.CreatedAt
 			}
-		case "reviewed":
-			if e.User != nil && e.User.Login == login {
-				at := e.SubmittedAt
-				if at.IsZero() {
-					at = e.CreatedAt
-				}
-				if at.After(reviewedAt) {
-					reviewedAt = at
-				}
-			}
 		}
 	}
-	if requestedAt.IsZero() || reviewedAt.After(requestedAt) {
-		return time.Time{}, nil
+	a := Activity{Participants: len(participants), InboundRefs: inbound}
+	if !requestedAt.IsZero() && !reviewedAt.After(requestedAt) {
+		a.AwaitingMeSince = requestedAt
 	}
-	return requestedAt, nil
+	return a, nil
+}
+
+func (c *Client) fetchTimeline(ctx context.Context, token, repo string, number int) ([]timelineEvent, error) {
+	path := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=%d", repo, number, perPage)
+	body, err := c.get(ctx, token, path)
+	if err != nil {
+		return nil, err
+	}
+	var events []timelineEvent
+	if err := json.Unmarshal(body, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func eventLogin(e timelineEvent) string {
+	if e.Actor != nil && e.Actor.Login != "" {
+		return e.Actor.Login
+	}
+	if e.User != nil && e.User.Login != "" {
+		return e.User.Login
+	}
+	return ""
 }

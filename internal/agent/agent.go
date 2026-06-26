@@ -81,18 +81,22 @@ func RunEnrich(ctx context.Context, p RunParams) error {
 	if err != nil {
 		return fmt.Errorf("list worklist: %w", err)
 	}
-	// Augment stored items in place: only review-requested PRs need the timeline
-	// call, and only changed items are written back (docs/adr/0010).
+	// Augment stored items in place from a single per-item timeline call, and
+	// write back only what changed (docs/adr/0010).
 	var changed []worklist.WorkItem
 	for i := range items {
-		if !reviewRequested(items[i].Signals.Reasons) {
+		act, err := gh.ItemActivity(ctx, cred.AccessToken, items[i].GitHub.Repo, items[i].GitHub.Number, login)
+		if err != nil {
+			continue // best-effort: leave the item's signals unchanged
+		}
+		s := &items[i].Signals
+		if act.Participants == s.Participants && act.InboundRefs == s.InboundRefs && act.AwaitingMeSince.Equal(s.AwaitingMeSince) {
 			continue
 		}
-		at, err := gh.AwaitingMeSince(ctx, cred.AccessToken, items[i].GitHub.Repo, items[i].GitHub.Number, login)
-		if err == nil && !at.IsZero() && !at.Equal(items[i].Signals.AwaitingMeSince) {
-			items[i].Signals.AwaitingMeSince = at
-			changed = append(changed, items[i])
-		}
+		s.Participants = act.Participants
+		s.InboundRefs = act.InboundRefs
+		s.AwaitingMeSince = act.AwaitingMeSince
+		changed = append(changed, items[i])
 	}
 	if len(changed) == 0 {
 		return nil
@@ -101,13 +105,4 @@ func RunEnrich(ctx context.Context, p RunParams) error {
 		return fmt.Errorf("ingest: %w", err)
 	}
 	return nil
-}
-
-func reviewRequested(rs []worklist.Reason) bool {
-	for _, r := range rs {
-		if r == worklist.ReasonReviewRequested {
-			return true
-		}
-	}
-	return false
 }
