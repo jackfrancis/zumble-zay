@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/principal"
@@ -89,5 +90,20 @@ func (h *IngestHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load work items")
 		return
 	}
+	// Optional shortlist: when limit > 0, return the top-N by rank so an
+	// enrichment runtime can bound its expensive per-item fan-out (docs/adr/0010).
+	// Selection lives here because ZZ owns ranking; the agent only chooses depth.
+	if limit := parseLimit(r.URL.Query().Get("limit")); limit > 0 && limit < len(items) {
+		_ = worklist.Sort(items, worklist.SortRank, true)
+		items = items[:limit]
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func parseLimit(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }

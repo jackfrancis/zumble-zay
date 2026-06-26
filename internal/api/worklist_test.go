@@ -196,3 +196,32 @@ func TestAgentWorklistListReturnsStoredItemsRaw(t *testing.T) {
 		t.Errorf("agent read must not rescore: rank=%v want 0.42", body.Items[0].Meta.Rank)
 	}
 }
+
+func TestAgentWorklistListLimitReturnsTopByRank(t *testing.T) {
+	store := worklist.NewMemoryStore()
+	store.Seed("u1",
+		worklist.WorkItem{ID: "low", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.1, Origin: worklist.OriginAgent}},
+		worklist.WorkItem{ID: "high", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.9, Origin: worklist.OriginAgent}},
+		worklist.WorkItem{ID: "mid", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.5, Origin: worklist.OriginAgent}},
+	)
+	h := NewIngestHandler(store)
+
+	rec := httptest.NewRecorder()
+	h.List(rec, authedRequest("/agent/worklist?limit=2", "u1"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Items []worklist.WorkItem `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("limit=2 should cap to 2 items, got %d", len(body.Items))
+	}
+	if body.Items[0].ID != "high" || body.Items[1].ID != "mid" {
+		t.Errorf("expected top-2 by rank [high mid], got [%s %s]", body.Items[0].ID, body.Items[1].ID)
+	}
+}

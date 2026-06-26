@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -115,8 +116,14 @@ func (c *ZZClient) Ingest(ctx context.Context, items []worklist.WorkItem) error 
 // ListWorklist performs the read side of the contract: GET /agent/worklist,
 // returning the acting user's persisted work items so a runtime can augment
 // them in place rather than re-deriving them from the provider (docs/adr/0010).
-func (c *ZZClient) ListWorklist(ctx context.Context) ([]worklist.WorkItem, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/agent/worklist", nil)
+// A positive limit requests only the top-N items by rank, bounding expensive
+// per-item enrichment.
+func (c *ZZClient) ListWorklist(ctx context.Context, limit int) ([]worklist.WorkItem, error) {
+	u := c.baseURL + "/agent/worklist"
+	if limit > 0 {
+		u += "?limit=" + strconv.Itoa(limit)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}

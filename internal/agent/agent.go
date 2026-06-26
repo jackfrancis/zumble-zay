@@ -27,6 +27,7 @@ type RunParams struct {
 	Client        *http.Client // shared HTTP client
 	Token         string       // ZZ job token (bearer)
 	Provider      string       // e.g. "github"
+	EnrichLimit   int          // max items to enrich per run; 0 uses the default
 }
 
 // Run executes the ingestion job: vend the provider credential from ZZ, fetch
@@ -56,6 +57,17 @@ func Run(ctx context.Context, p RunParams) error {
 	return nil
 }
 
+// defaultEnrichLimit bounds how many items a single enrich run fetches expensive
+// per-item signals for, capping GitHub API fan-out (docs/adr/0010).
+const defaultEnrichLimit = 50
+
+func enrichLimit(n int) int {
+	if n <= 0 {
+		return defaultEnrichLimit
+	}
+	return n
+}
+
 // RunEnrich is the github-enrich runtime: it reads the user's persisted work
 // from ZZ and augments the review-requested PRs with the AwaitingMeSince signal
 // (how long each has been blocked on the user), writing back only the items it
@@ -77,7 +89,7 @@ func RunEnrich(ctx context.Context, p RunParams) error {
 	if err != nil {
 		return fmt.Errorf("github login: %w", err)
 	}
-	items, err := zz.ListWorklist(ctx)
+	items, err := zz.ListWorklist(ctx, enrichLimit(p.EnrichLimit))
 	if err != nil {
 		return fmt.Errorf("list worklist: %w", err)
 	}
