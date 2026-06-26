@@ -13,3 +13,15 @@ data:
   # The Ingress terminates TLS, so the Secure cookie flag must be set.
   COOKIE_SECURE: "true"
   MICROSOFT_TENANT: "common"
+  # Agent-runtime substrate: how the orchestrator launches agent jobs. The swap
+  # is config-only (ADR 0012). "inprocess" (default) runs jobs in the server
+  # process; "k8s-job" runs each as a Kubernetes Job (requires the launcher
+  # RBAC). An unknown value fails fast at startup.
+  LAUNCHER: "inprocess"
+  # Out-of-process runtime settings, used only when LAUNCHER=k8s-job. These have
+  # code defaults; override per environment. RUNTIME_SERVICE_ACCOUNT is optional
+  # (the runtime only needs HTTP egress to ZZ, not the Kubernetes API).
+  # RUNTIME_IMAGE: "localhost/zumble-zay-runtime:dev"
+  # RUNTIME_NAMESPACE: "zumble-zay"
+  # RUNTIME_ZZ_BASE_URL: "http://zumble-zay:8080"
+  # RUNTIME_SERVICE_ACCOUNT: ""

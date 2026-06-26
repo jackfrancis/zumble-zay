@@ -80,11 +80,16 @@ func loopbackBaseURL(addr string) string {
 	return "http://" + addr
 }
 
-// selectLauncher builds the agent launcher chosen by the LAUNCHER env var. The
-// default in-process launcher reaches ZZ over loopback (docs/adr/0007); the
-// k8s-job launcher runs each agent job as a Kubernetes Job (docs/adr/0012).
+// selectLauncher builds the agent launcher chosen by cfg.Launcher. The default
+// in-process launcher reaches ZZ over loopback (docs/adr/0007); the k8s-job
+// launcher runs each agent job as a Kubernetes Job (docs/adr/0012). An unknown
+// value is a configuration error: selection is the swap mechanism, so a typo or
+// an unbuilt substrate must fail fast rather than silently run in-process.
 func selectLauncher(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) {
-	switch os.Getenv("LAUNCHER") {
+	switch cfg.Launcher {
+	case "inprocess":
+		log.Info("using in-process launcher")
+		return agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log), nil
 	case "k8s-job":
 		restCfg, err := rest.InClusterConfig()
 		if err != nil {
@@ -95,22 +100,14 @@ func selectLauncher(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher
 			return nil, fmt.Errorf("kubernetes client: %w", err)
 		}
 		lc := k8slauncher.Config{
-			Namespace:      envOr("RUNTIME_NAMESPACE", "zumble-zay"),
-			Image:          envOr("RUNTIME_IMAGE", "localhost/zumble-zay-runtime:dev"),
-			ZZBaseURL:      envOr("RUNTIME_ZZ_BASE_URL", "http://zumble-zay:8080"),
-			ServiceAccount: os.Getenv("RUNTIME_SERVICE_ACCOUNT"),
+			Namespace:      cfg.Runtime.Namespace,
+			Image:          cfg.Runtime.Image,
+			ZZBaseURL:      cfg.Runtime.ZZBaseURL,
+			ServiceAccount: cfg.Runtime.ServiceAccount,
 		}
 		log.Info("using kubernetes-job launcher", "namespace", lc.Namespace, "image", lc.Image, "zz_base_url", lc.ZZBaseURL)
 		return k8slauncher.New(cs, lc), nil
 	default:
-		log.Info("using in-process launcher")
-		return agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log), nil
+		return nil, fmt.Errorf("unknown LAUNCHER %q (want inprocess or k8s-job)", cfg.Launcher)
 	}
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

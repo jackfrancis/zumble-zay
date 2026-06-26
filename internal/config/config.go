@@ -15,6 +15,24 @@ type Config struct {
 	SessionSecret  []byte
 	CookieSecure   bool
 	Providers      Providers
+	// Launcher selects the agent-runtime substrate (e.g. "inprocess",
+	// "k8s-job"). It is the swap mechanism for ADR 0012: changing substrates is
+	// a config change, not a code change. The known set is validated where the
+	// launcher is constructed, so an unknown value fails fast at startup.
+	Launcher string
+	// Runtime configures how out-of-process agent runtimes are launched. It is
+	// consumed only by substrate launchers (e.g. the Kubernetes Job launcher);
+	// the in-process launcher ignores it.
+	Runtime RuntimeConfig
+}
+
+// RuntimeConfig configures the out-of-process agent runtime: the image to run
+// and where it reaches ZZ in-cluster (docs/adr/0012).
+type RuntimeConfig struct {
+	Namespace      string
+	Image          string
+	ZZBaseURL      string
+	ServiceAccount string
 }
 
 // Providers holds the OAuth client credentials for each supported provider.
@@ -62,6 +80,13 @@ func Load() (*Config, error) {
 				ClientSecret: os.Getenv("MICROSOFT_CLIENT_SECRET"),
 			},
 			MicrosoftTenant: getEnv("MICROSOFT_TENANT", "common"),
+		},
+		Launcher: getEnv("LAUNCHER", "inprocess"),
+		Runtime: RuntimeConfig{
+			Namespace:      getEnv("RUNTIME_NAMESPACE", "zumble-zay"),
+			Image:          getEnv("RUNTIME_IMAGE", "localhost/zumble-zay-runtime:dev"),
+			ZZBaseURL:      getEnv("RUNTIME_ZZ_BASE_URL", "http://zumble-zay:8080"),
+			ServiceAccount: os.Getenv("RUNTIME_SERVICE_ACCOUNT"),
 		},
 	}
 

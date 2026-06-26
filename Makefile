@@ -101,6 +101,12 @@ dev-up: cluster-up kind-load
 		kubectl -n $(KUBE_NS) create secret generic zumble-zay-secrets \
 			--from-literal=SESSION_SECRET="$$(openssl rand -base64 48)"
 	kubectl apply -k deploy/k8s/overlays/dev
+	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
+	# content changed — the Deployment spec is identical and no new pod is
+	# created, leaving the old code running. kind-load already replaced the image
+	# on the node, so force a rollout to adopt it. (Agent Jobs need no equivalent:
+	# each is a fresh pod that pulls IfNotPresent from the reloaded node image.)
+	kubectl -n $(KUBE_NS) rollout restart deploy/zumble-zay
 	kubectl -n $(KUBE_NS) rollout status deploy/zumble-zay --timeout=120s
 	@echo
 	@echo "zumble-zay is running. Expose it with:  make dev-forward"
