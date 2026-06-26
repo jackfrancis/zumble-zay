@@ -1,6 +1,7 @@
-# The orchestrator (running in the server pod) creates and watches runtime Jobs
-# when LAUNCHER=k8s-job (docs/adr/0012). Least privilege: namespaced, jobs plus
-# read-only pods (for status/logs), nothing cluster-wide.
+# The orchestrator (running in the server pod) creates and watches runtime
+# workloads when LAUNCHER=k8s-job or k8s-pod (docs/adr/0012). Least privilege:
+# namespaced, jobs plus pods (create/watch/delete the runtime workloads, read
+# their logs), nothing cluster-wide.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -10,8 +11,11 @@ rules:
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
-    resources: ["pods", "pods/log"]
-    verbs: ["get", "list", "watch"]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

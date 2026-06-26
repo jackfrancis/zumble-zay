@@ -16,9 +16,10 @@ data:
   # Agent-runtime substrate: how the orchestrator launches agent jobs. The swap
   # is config-only (ADR 0012). "k8s-job" runs each agent job as a Kubernetes Job
   # (the deployed default — Kubernetes is the substrate; requires the launcher
-  # RBAC and the runtime image). "inprocess" runs jobs in the server process and
-  # is the code-level default for non-cluster runs (local, tests, CI). An unknown
-  # value fails fast at startup.
+  # RBAC and the runtime image). "k8s-pod" runs each as a bare Pod (no
+  # retry/backoff or TTL GC — a lifecycle contrast). "inprocess" runs jobs in
+  # the server process and is the code-level default for non-cluster runs
+  # (local, tests, CI). An unknown value fails fast at startup.
   LAUNCHER: "k8s-job"
   # Out-of-process runtime settings, used only when LAUNCHER=k8s-job. These have
   # code defaults; override per environment. RUNTIME_SERVICE_ACCOUNT is optional

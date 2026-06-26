@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/jackfrancis/zumble-zay/internal/agent"
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 )
 
@@ -61,28 +60,13 @@ func (l *KubernetesJobLauncher) Launch(ctx context.Context, spec orchestrator.Jo
 }
 
 func (l *KubernetesJobLauncher) jobSpec(spec orchestrator.JobSpec, token string) *batchv1.Job {
-	env := agent.Env(agent.RunParams{
-		JobType:       string(spec.Type),
-		BaseURL:       l.cfg.ZZBaseURL,
-		Token:         token,
-		Provider:      spec.Provider,
-		GitHubBaseURL: l.cfg.GitHubBaseURL,
-	})
-	envVars := make([]corev1.EnvVar, 0, len(env))
-	for k, v := range env {
-		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
-	}
 	backoff := int32(0)
 	ttl := l.cfg.TTLAfterFinish
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "zz-" + string(spec.Type) + "-",
 			Namespace:    l.cfg.Namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":     "zumble-zay-runtime",
-				"zumble-zay.dev/job-type":    string(spec.Type),
-				"zumble-zay.dev/acting-user": sanitizeLabel(spec.ActingUserID),
-			},
+			Labels:       runtimeLabels(spec),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &backoff,
@@ -91,12 +75,7 @@ func (l *KubernetesJobLauncher) jobSpec(spec orchestrator.JobSpec, token string)
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: l.cfg.ServiceAccount,
-					Containers: []corev1.Container{{
-						Name:            "runtime",
-						Image:           l.cfg.Image,
-						ImagePullPolicy: corev1.PullIfNotPresent,
-						Env:             envVars,
-					}},
+					Containers:         []corev1.Container{runtimeContainer(l.cfg, spec, token)},
 				},
 			},
 		},

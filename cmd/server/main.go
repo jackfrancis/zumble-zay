@@ -91,23 +91,48 @@ func selectLauncher(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher
 		log.Info("using in-process launcher")
 		return agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log), nil
 	case "k8s-job":
-		restCfg, err := rest.InClusterConfig()
+		cs, err := inClusterClientset()
 		if err != nil {
-			return nil, fmt.Errorf("in-cluster config: %w", err)
+			return nil, err
 		}
-		cs, err := kubernetes.NewForConfig(restCfg)
-		if err != nil {
-			return nil, fmt.Errorf("kubernetes client: %w", err)
-		}
-		lc := k8slauncher.Config{
-			Namespace:      cfg.Runtime.Namespace,
-			Image:          cfg.Runtime.Image,
-			ZZBaseURL:      cfg.Runtime.ZZBaseURL,
-			ServiceAccount: cfg.Runtime.ServiceAccount,
-		}
+		lc := runtimeLauncherConfig(cfg)
 		log.Info("using kubernetes-job launcher", "namespace", lc.Namespace, "image", lc.Image, "zz_base_url", lc.ZZBaseURL)
 		return k8slauncher.New(cs, lc), nil
+	case "k8s-pod":
+		cs, err := inClusterClientset()
+		if err != nil {
+			return nil, err
+		}
+		lc := runtimeLauncherConfig(cfg)
+		log.Info("using kubernetes-pod launcher", "namespace", lc.Namespace, "image", lc.Image, "zz_base_url", lc.ZZBaseURL)
+		return k8slauncher.NewPodLauncher(cs, lc), nil
 	default:
-		return nil, fmt.Errorf("unknown LAUNCHER %q (want inprocess or k8s-job)", cfg.Launcher)
+		return nil, fmt.Errorf("unknown LAUNCHER %q (want inprocess, k8s-job, or k8s-pod)", cfg.Launcher)
+	}
+}
+
+// inClusterClientset builds a Kubernetes client from the pod's mounted
+// ServiceAccount. It only works inside a cluster, so it is reached only by the
+// substrate launchers, never the in-process default.
+func inClusterClientset() (*kubernetes.Clientset, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster config: %w", err)
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes client: %w", err)
+	}
+	return cs, nil
+}
+
+// runtimeLauncherConfig maps the runtime settings onto the substrate launcher
+// config shared by the Job and Pod launchers.
+func runtimeLauncherConfig(cfg *config.Config) k8slauncher.Config {
+	return k8slauncher.Config{
+		Namespace:      cfg.Runtime.Namespace,
+		Image:          cfg.Runtime.Image,
+		ZZBaseURL:      cfg.Runtime.ZZBaseURL,
+		ServiceAccount: cfg.Runtime.ServiceAccount,
 	}
 }
