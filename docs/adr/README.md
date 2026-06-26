@@ -19,3 +19,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0012](0012-kubernetes-native-substrates-swappable.md) | Kubernetes-native agent substrates are swappable behind a runtime artifact | Accepted |
 | [0013](0013-stay-on-github-oauth-app.md) | ZZ stays on the GitHub OAuth App (GitHub Apps can't serve a cross-org radar) | Accepted |
 | [0014](0014-axis-ranker-openai-compatible-client.md) | The AxisRanker uses an OpenAI-compatible chat-completions client (Copilot default) | Accepted |
+| [0015](0015-llm-axes-authoritative.md) | LLM axis proposals are authoritative (retire the ratify clamp and confidence floor) | Accepted |

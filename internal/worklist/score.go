@@ -16,22 +16,15 @@ const (
 	wEngagement = 0.15
 )
 
-// Axis ratification bounds (docs/adr/0011). A proposal below the confidence
-// floor is ignored; otherwise each axis may move toward the proposal but no
-// further than the max deviation from its deterministic baseline.
-const (
-	axisConfidenceFloor = 0.5
-	axisMaxDeviation    = 0.4
-)
-
 // Score computes an item's ZZ Metadata from its Signals, as of now. It is a
 // pure function of the item, so a worklist can be re-scored when the weights
 // change without re-fetching from the provider (see docs/adr/0008). Origin is
 // preserved; the caller owns persistence timestamps.
 //
-// When the item carries an LLM AxisProposal, ZZ ratifies it against the
-// deterministic baseline — a confident proposal may move each axis, but only
-// within a clamp — then blends the ratified axes into Rank (docs/adr/0011).
+// When the item carries an LLM AxisProposal, that proposal is authoritative for
+// the four axes it returns (bounded only to [0,1]); the deterministic baseline
+// is the fallback used when no proposal is present. ZZ still owns how the axes
+// blend into Rank (docs/adr/0011, amended by 0015).
 //
 // Time-dependent axes (Engagement, Urgency) are evaluated against now, so a
 // later read-time rescore keeps them fresh as the ADR anticipates.
@@ -43,16 +36,20 @@ func Score(item WorkItem, now time.Time) Metadata {
 	eng := engagementScore(item.Signals, &contribs)
 	imp := impactScore(item.Signals, &contribs)
 
-	// Ratify an LLM axis proposal against the deterministic baseline so
-	// attacker-influenced content cannot fully hijack ordering (docs/adr/0011).
-	if p := item.Signals.Proposed; p != nil && p.Confidence >= axisConfidenceFloor {
-		rel = ratifyAxis(rel, p.Relevance)
-		imp = ratifyAxis(imp, p.Impact)
-		eng = ratifyAxis(eng, p.Engagement)
-		urg = ratifyAxis(urg, p.Urgency)
+	// An LLM proposal is authoritative for the four axes it returns: ZZ uses the
+	// proposed values directly, bounded only to [0,1]. The baseline above is the
+	// fallback for when no proposal is present (no model, a model error, or the
+	// StubRanker echoing the baseline). There is no confidence gate or deviation
+	// clamp — the model's judgment is tuned in its instructions, not averaged
+	// against the baseline (docs/adr/0015).
+	if p := item.Signals.Proposed; p != nil {
+		rel = clampUnit(p.Relevance)
+		imp = clampUnit(p.Impact)
+		eng = clampUnit(p.Engagement)
+		urg = clampUnit(p.Urgency)
 		detail := p.Rationale
 		if detail == "" {
-			detail = "LLM-ratified axes"
+			detail = "LLM-scored axes"
 		}
 		add(&contribs, "rank", "llm", p.Confidence, detail)
 	}
@@ -70,7 +67,13 @@ func Score(item WorkItem, now time.Time) Metadata {
 		Origin:        item.Meta.Origin,
 		ScoredAt:      now,
 	}
-	m.Rationale = rationale(contribs)
+	// The LLM rationale is the headline explanation when a proposal scored the
+	// item; otherwise it is derived from the signal contributions.
+	if p := item.Signals.Proposed; p != nil && p.Rationale != "" {
+		m.Rationale = p.Rationale
+	} else {
+		m.Rationale = rationale(contribs)
+	}
 	return m
 }
 
@@ -86,19 +89,11 @@ func baselineAxes(s Signals, now time.Time) (rel, imp, eng, urg float64) {
 	return rel, imp, eng, urg
 }
 
-// ratifyAxis moves the baseline toward the LLM proposal but no further than
-// axisMaxDeviation, keeping the result in [0,1].
-func ratifyAxis(baseline, proposed float64) float64 {
-	lo := math.Max(0, baseline-axisMaxDeviation)
-	hi := math.Min(1, baseline+axisMaxDeviation)
-	switch {
-	case proposed < lo:
-		return lo
-	case proposed > hi:
-		return hi
-	default:
-		return proposed
-	}
+// ratifyAxis is retired (docs/adr/0015): an LLM proposal is now authoritative
+// for its axes, so ZZ no longer clamps it toward the baseline. clampUnit only
+// bounds a value to [0,1], the valid range for an axis.
+func clampUnit(f float64) float64 {
+	return math.Max(0, math.Min(1, f))
 }
 
 // relevanceScore: the strongest relationship reason wins, with a small bump for
