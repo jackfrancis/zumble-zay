@@ -47,14 +47,17 @@ func logRequests(log *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
-// securityHeaders sets conservative security-related response headers.
+// securityHeaders sets conservative security-related response headers. The CSP
+// allows same-origin styles (the UI ships vendored Primer CSS + app.css from
+// /static) but nothing else: no inline styles or scripts, no third-party origins
+// (docs/adr/0016).
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }

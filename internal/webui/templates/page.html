@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en" data-color-mode="light" data-light-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zumble-Zay</title>
+  {{if .RefreshSecs}}<meta http-equiv="refresh" content="{{.RefreshSecs}}">{{end}}
+  <link rel="stylesheet" href="/static/primer/primitives.css">
+  <link rel="stylesheet" href="/static/primer/functional/themes/light.css">
+  <link rel="stylesheet" href="/static/primer/primer.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="zz-container">
+    <header class="zz-header">
+      <span class="zz-brand">Zumble-Zay</span>
+      {{if .User}}<span class="zz-user">{{with .User.Name}}{{.}}{{else}}{{.User.Email}}{{end}}</span>{{end}}
+    </header>
+
+    {{if eq .View "signin"}}
+      <div class="zz-signin">
+        <h1>Your work, ranked.</h1>
+        <p>Sign in to see your GitHub work ordered by what needs your attention.</p>
+        <div class="zz-actions">
+          {{range .Providers}}
+            <a class="btn btn-primary" href="/auth/{{.}}/login">Sign in with {{. | title}}</a>
+          {{else}}
+            <p>No sign-in providers are configured.</p>
+          {{end}}
+        </div>
+      </div>
+
+    {{else if eq .View "processing"}}
+      <div class="zz-empty">
+        <h1>Discovering your work…</h1>
+        <p>We're pulling your GitHub work and ranking it. This page refreshes automatically.</p>
+      </div>
+
+    {{else if eq .View "error"}}
+      <div class="zz-empty">
+        <h1>Something went wrong</h1>
+        <p>We couldn't load your work right now. Try again in a moment.</p>
+      </div>
+
+    {{else}}
+      <p class="zz-count">{{len .Items}} item{{if ne (len .Items) 1}}s{{end}} on your radar</p>
+      {{range .Items}}
+        <div class="zz-item">
+          <div class="zz-title"><a href="{{.GitHub.URL}}" target="_blank" rel="noopener noreferrer">{{.GitHub.Title}}</a></div>
+          <div class="zz-meta">
+            <span>{{.GitHub.Repo}} #{{.GitHub.Number}}</span>
+            <span class="Label {{priorityClass .Meta.Priority}}">{{with .Meta.Priority}}{{.}}{{else}}unranked{{end}}</span>
+            <span class="Label Label--secondary">{{typeLabel .Type}}</span>
+          </div>
+          <div class="zz-bar"><span class="zz-w-{{pctBucket .Meta.Rank}}"></span></div>
+          <div class="zz-axes">
+            <span>Relevance <b>{{axis2 .Meta.Relevance}}</b></span>
+            <span>Impact <b>{{axis2 .Meta.Impact}}</b></span>
+            <span>Engagement <b>{{axis2 .Meta.Engagement}}</b></span>
+            <span>Urgency <b>{{axis2 .Meta.Urgency}}</b></span>
+          </div>
+          {{with .Meta.Rationale}}<div class="zz-rationale">{{.}}</div>{{end}}
+        </div>
+      {{else}}
+        <div class="zz-empty"><p>Nothing on your radar right now.</p></div>
+      {{end}}
+    {{end}}
+  </div>
+</body>
+</html>

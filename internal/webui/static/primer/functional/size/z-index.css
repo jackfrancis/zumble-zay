@@ -1,0 +1,10 @@
+:root {
+  --zIndex-behind: -1; /** Place element behind base content. Use for decorative backgrounds or canvas elements. */
+  --zIndex-default: 0; /** Default stacking order. No elevation above surrounding content. */
+  --zIndex-dropdown: 200; /** Dropdown menus and select panels that appear above page content. */
+  --zIndex-modal: 400; /** Modal dialogs and full-screen overlays. */
+  --zIndex-overlay: 300; /** Overlay backdrops, side panels, and drawers. */
+  --zIndex-popover: 500; /** Tooltips and popovers that appear above all normal UI. */
+  --zIndex-skipLink: 600; /** Accessibility skip links. Must always be the topmost layer. */
+  --zIndex-sticky: 100; /** Sticky elements that remain visible while scrolling. */
+}

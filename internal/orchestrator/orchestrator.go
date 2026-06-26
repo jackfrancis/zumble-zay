@@ -353,6 +353,20 @@ func (o *Orchestrator) Jobs() []Job {
 	return out
 }
 
+// Active reports whether any job for ownerID is still pending or running, i.e.
+// an ingest/enrich/llm-rank pass is in flight for that user. The UI uses it to
+// keep auto-refreshing the worklist until ranking settles (docs/adr/0016).
+func (o *Orchestrator) Active(ownerID string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, j := range o.jobs {
+		if j.ActingUserID == ownerID && (j.State == StatePending || j.State == StateRunning) {
+			return true
+		}
+	}
+	return false
+}
+
 // Stop drains the worker pool. After Stop, EnsureBackfill returns an error.
 func (o *Orchestrator) Stop() {
 	o.mu.Lock()

@@ -1,6 +1,6 @@
 .PHONY: build run test tidy vet fmt clean image image-save kind-load engine \
         cluster-up cluster-down dev-up dev-down dev-forward dev-logs \
-        build-runtime image-runtime image-runtime-save kind-load-runtime
+        build-runtime image-runtime image-runtime-save kind-load-runtime vendor-primer
 
 BIN := bin/server
 
@@ -16,6 +16,13 @@ IMAGE ?= localhost/zumble-zay:dev
 # in-process, built as a binary/image so it can run as an out-of-process workload.
 RUNTIME_BIN := bin/runtime
 RUNTIME_IMAGE ?= localhost/zumble-zay-runtime:dev
+
+# Vendored GitHub Primer CSS (the UI's design system, served from the binary).
+# `make vendor-primer` refreshes these at the pinned versions; bump the versions
+# and re-run to scoop in updates.
+PRIMER_CSS_VERSION ?= 22.3.0
+PRIMER_PRIMITIVES_VERSION ?= 11.9.0
+PRIMER_DIR := internal/webui/static/primer
 
 KIND_CLUSTER ?= zumble-zay
 KUBE_NS := zumble-zay
@@ -49,6 +56,22 @@ fmt:
 
 clean:
 	rm -rf bin zumble-zay-image.tar zumble-zay-runtime-image.tar
+
+# Refresh the vendored GitHub Primer CSS at the pinned versions (the UI's design
+# system). Re-run after bumping PRIMER_*_VERSION to scoop in updates.
+vendor-primer:
+	@mkdir -p $(PRIMER_DIR)
+	curl -sfL https://unpkg.com/@primer/css@$(PRIMER_CSS_VERSION)/dist/primer.css -o $(PRIMER_DIR)/primer.css
+	@for f in primitives.css \
+		base/motion/motion.css base/size/size.css base/size/z-index.css base/typography/typography.css \
+		functional/motion/motion.css functional/size/border.css functional/size/breakpoints.css \
+		functional/size/radius.css functional/size/size-coarse.css functional/size/size-fine.css \
+		functional/size/size.css functional/size/z-index.css functional/spacing/space.css \
+		functional/typography/typography.css functional/themes/light.css; do \
+		mkdir -p "$(PRIMER_DIR)/$$(dirname $$f)"; \
+		curl -sfL "https://unpkg.com/@primer/primitives@$(PRIMER_PRIMITIVES_VERSION)/dist/css/$$f" -o "$(PRIMER_DIR)/$$f" || exit 1; \
+	done
+	@echo "vendored Primer CSS $(PRIMER_CSS_VERSION) + primitives $(PRIMER_PRIMITIVES_VERSION) into $(PRIMER_DIR)"
 
 # Print the detected container engine.
 engine:

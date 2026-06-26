@@ -1,0 +1,18 @@
+/**
+ * @spec See /DESIGN_TOKENS_SPEC.md for naming logic and semantic pairings.
+ * @rule Never use raw values (hex/px). Use semantic tokens ONLY.
+ */
+@import './base/motion/motion.css';
+@import './base/size/size.css';
+@import './base/size/z-index.css';
+@import './base/typography/typography.css';
+@import './functional/motion/motion.css';
+@import './functional/size/border.css';
+@import './functional/size/breakpoints.css';
+@import './functional/size/radius.css';
+@import './functional/size/size-coarse.css';
+@import './functional/size/size-fine.css';
+@import './functional/size/size.css';
+@import './functional/size/z-index.css';
+@import './functional/spacing/space.css';
+@import './functional/typography/typography.css';

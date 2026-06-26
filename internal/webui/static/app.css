@@ -1,0 +1,80 @@
+/* App layout for the Zumble-Zay landing page. Colors/spacing come from Primer's
+ * design tokens (stable CSS custom properties from @primer/primitives) so this
+ * stays in step with vendored Primer. No inline styles are used anywhere, so the
+ * page needs only `style-src 'self'` (the rank-bar widths are bucketed classes). */
+
+body {
+  margin: 0;
+  background: var(--bgColor-default, #ffffff);
+  color: var(--fgColor-default, #1f2328);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+a { color: var(--fgColor-accent, #0969da); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.zz-container { max-width: 880px; margin: 0 auto; padding: 24px 16px; }
+
+.zz-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--borderColor-muted, #d1d9e0b3);
+}
+.zz-brand { font-size: 18px; font-weight: 600; }
+.zz-user { color: var(--fgColor-muted, #59636e); font-size: 13px; }
+
+.zz-count { color: var(--fgColor-muted, #59636e); margin-bottom: 16px; }
+
+.zz-item {
+  padding: 16px;
+  border: 1px solid var(--borderColor-default, #d1d9e0);
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+.zz-title { font-size: 16px; font-weight: 600; }
+.zz-meta { color: var(--fgColor-muted, #59636e); font-size: 12px; margin-top: 4px; }
+.zz-meta > * { margin-right: 6px; }
+.zz-rationale { font-size: 13px; margin-top: 10px; }
+.zz-axes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--fgColor-muted, #59636e);
+}
+.zz-axes b { color: var(--fgColor-default, #1f2328); font-variant-numeric: tabular-nums; }
+
+.zz-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bgColor-neutral-muted, #818b981f);
+  overflow: hidden;
+  margin-top: 12px;
+}
+.zz-bar > span { display: block; height: 100%; background: var(--bgColor-accent-emphasis, #0969da); }
+
+/* Rank-bar width buckets (avoids inline styles so CSP needs no 'unsafe-inline'). */
+.zz-w-0 { width: 0; }
+.zz-w-10 { width: 10%; }
+.zz-w-20 { width: 20%; }
+.zz-w-30 { width: 30%; }
+.zz-w-40 { width: 40%; }
+.zz-w-50 { width: 50%; }
+.zz-w-60 { width: 60%; }
+.zz-w-70 { width: 70%; }
+.zz-w-80 { width: 80%; }
+.zz-w-90 { width: 90%; }
+.zz-w-100 { width: 100%; }
+
+.zz-empty { text-align: center; padding: 64px 16px; color: var(--fgColor-muted, #59636e); }
+.zz-empty h1 { color: var(--fgColor-default, #1f2328); }
+.zz-signin { text-align: center; padding: 64px 16px; }
+.zz-signin h1 { margin-bottom: 8px; }
+.zz-signin p { color: var(--fgColor-muted, #59636e); margin-bottom: 24px; }
+.zz-actions > * { margin: 0 4px; }

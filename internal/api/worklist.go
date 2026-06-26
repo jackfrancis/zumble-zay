@@ -59,49 +59,16 @@ func (h *WorklistHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := h.store.List(r.Context(), p.ActingUserID)
+	status, items, err := worklist.Resolve(r.Context(), h.store, h.ingestor, h.now(), p.ActingUserID, key, desc)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load work items")
+		writeError(w, http.StatusBadGateway, "could not load work items")
 		return
 	}
-
-	if len(items) == 0 {
-		// Rare with persistence: start the agentic backfill and tell the UI to
-		// show its waiting experience.
-		if err := h.ingestor.EnsureBackfill(r.Context(), p.ActingUserID); err != nil {
-			writeError(w, http.StatusBadGateway, "could not start processing")
-			return
-		}
-		writeJSON(w, http.StatusOK, worklistResponse{
-			Status: "processing",
-			Sort:   string(key),
-			Order:  orderString(desc),
-			Items:  []worklist.WorkItem{},
-		})
-		return
-	}
-
-	// Time-dependent axes (urgency, engagement) decay with the clock, so
-	// evaluate each item's score against now at read time rather than trusting
-	// the value frozen at ingest (docs/adr/0008). This is pure evaluation of
-	// persisted ZZ data — core read-model logic, never an agent's job. Human
-	// overrides (OriginUser) are preserved verbatim.
-	now := h.now()
-	for i := range items {
-		if items[i].Meta.Origin == worklist.OriginUser {
-			continue
-		}
-		scored := worklist.Score(items[i], now)
-		scored.UpdatedAt = items[i].Meta.UpdatedAt // preserve persisted write time
-		items[i].Meta = scored
-	}
-
-	if err := worklist.Sort(items, key, desc); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid sort")
-		return
+	if items == nil {
+		items = []worklist.WorkItem{}
 	}
 	writeJSON(w, http.StatusOK, worklistResponse{
-		Status: "ready",
+		Status: status,
 		Sort:   string(key),
 		Order:  orderString(desc),
 		Items:  items,

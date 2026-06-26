@@ -1,0 +1,15 @@
+:root {
+  --motion-duration-long: var(--base-duration-500); /** Longer duration for complex multi-step animations or large-scale layout shifts. Use sparingly. */
+  --motion-duration-medium: var(--base-duration-300); /** Standard duration for elements entering or exiting the viewport, such as modals and dropdowns. */
+  --motion-duration-micro: var(--base-duration-100); /** Fast micro-interactions like hover, focus ring, and color shifts. */
+  --motion-duration-short: var(--base-duration-200); /** Quick transitions for state changes like expand/collapse, toggles, and visibility changes. */
+  --motion-easing-enter: var(--base-easing-easeOut); /** Decelerating easing for elements entering the viewport or appearing on screen. */
+  --motion-easing-exit: var(--base-easing-easeIn); /** Accelerating easing for elements exiting the viewport or leaving the screen. */
+  --motion-easing-hover: var(--base-easing-ease); /** Easing for hover state changes and micro-interactions. */
+  --motion-easing-linear: var(--base-easing-linear); /** Constant motion with no acceleration. Use for continuous animations like progress bars or loaders. */
+  --motion-easing-move: var(--base-easing-easeInOut); /** Smooth easing for elements moving or morphing within the viewport. */
+  --motion-transition-enter: var(--motion-duration-medium) var(--motion-easing-enter); /** Transition for elements entering the viewport, such as modals, dropdowns, and tooltips. */
+  --motion-transition-exit: var(--motion-duration-short) var(--motion-easing-exit); /** Transition for elements exiting the viewport, such as closing modals and dismissing dropdowns. */
+  --motion-transition-hover: var(--motion-duration-micro) var(--motion-easing-hover); /** Transition for hover state changes on interactive elements like buttons and links. */
+  --motion-transition-stateChange: var(--motion-duration-short) var(--motion-easing-move); /** Transition for state changes like toggles, expand/collapse, and visibility changes. */
+}

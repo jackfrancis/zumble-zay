@@ -15,6 +15,7 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/principal"
 	"github.com/jackfrancis/zumble-zay/internal/session"
 	"github.com/jackfrancis/zumble-zay/internal/vault"
+	"github.com/jackfrancis/zumble-zay/internal/webui"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
@@ -48,6 +49,7 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	worklistHandler := api.NewWorklistHandler(store, orch)
 	credentialHandler := api.NewCredentialHandler(authH)
 	ingestHandler := api.NewIngestHandler(store)
+	webHandler := webui.New(sessions, store, orch, authH)
 
 	mux := http.NewServeMux()
 
@@ -56,6 +58,10 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+
+	// Landing page (server-rendered) and its static assets (docs/adr/0016).
+	mux.Handle("GET /{$}", http.HandlerFunc(webHandler.Index))
+	mux.Handle("GET /static/", webHandler.Static())
 
 	// Auth lifecycle.
 	mux.HandleFunc("GET /auth/providers", func(w http.ResponseWriter, r *http.Request) {
