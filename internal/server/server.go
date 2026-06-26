@@ -46,7 +46,7 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	// One store is shared by the read path (GET /api/worklist) and the agent
 	// write path (POST /agent/worklist).
 	worklistHandler := api.NewWorklistHandler(store, orch)
-	credentialHandler := api.NewCredentialHandler(vlt)
+	credentialHandler := api.NewCredentialHandler(authH)
 	ingestHandler := api.NewIngestHandler(store)
 
 	mux := http.NewServeMux()

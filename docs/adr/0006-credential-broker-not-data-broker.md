@@ -45,6 +45,16 @@ ZZ is a **credential broker, not a data broker**.
   expiring user-to-server tokens (refresh tokens held in the vault) so each job
   receives a genuinely short-lived credential. **Prioritize before agents run as
   out-of-process workloads or before onboarding untrusted agent code.**
+  - *In progress:* the **refresh-on-vend** mechanism is implemented — vend reads
+    the vault and, when the stored credential has a refresh token and has
+    expired, refreshes via the provider's OAuth token endpoint, persists the
+    rotated pair, and vends the fresh access token (`auth.Handler.Credential`
+    behind the `api.CredentialSource` seam). It is gated on a refresh token
+    being present, so it is a no-op for the current OAuth App and activates
+    automatically once a **GitHub App** (with user-token expiration enabled) is
+    registered and its client ID/secret configured — no further code change is
+    required, since the OAuth flow is identical and GitHub Apps ignore classic
+    scopes.
 - Amends ADR 0001 (ZZ vends credentials; it does not proxy data) and ADR 0002
   (the vault is the *durable* holder; runtimes are *transient* holders for the
   duration of a job).

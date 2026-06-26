@@ -235,6 +235,59 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+// Credential returns a usable credential for the user and provider, refreshing
+// and persisting it if it has expired and a refresh token is available. It is
+// the api.CredentialSource the vend endpoint uses, so token rotation happens at
+// the single point a credential leaves ZZ (docs/adr/0006). Providers whose
+// stored credential has no refresh token (e.g. the legacy GitHub OAuth App)
+// pass through unchanged.
+func (h *Handler) Credential(ctx context.Context, userID, providerName string) (vault.Credential, error) {
+	cred, err := h.vault.Get(ctx, userID, providerName)
+	if err != nil {
+		return vault.Credential{}, err
+	}
+	p, ok := h.providers[providerName]
+	if !ok || cred.RefreshToken == "" {
+		return cred, nil // nothing to refresh against
+	}
+
+	// Use ZZ's HTTP client for the refresh when one is configured; otherwise let
+	// oauth2 use its default. The TokenSource refreshes only when the stored
+	// access token has expired.
+	if h.client != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, h.client)
+	}
+	src := p.oauth.TokenSource(ctx, &oauth2.Token{
+		AccessToken:  cred.AccessToken,
+		RefreshToken: cred.RefreshToken,
+		TokenType:    cred.TokenType,
+		Expiry:       cred.Expiry,
+	})
+	fresh, err := src.Token()
+	if err != nil {
+		return vault.Credential{}, fmt.Errorf("refresh %s credential: %w", providerName, err)
+	}
+	if fresh.AccessToken == cred.AccessToken {
+		return cred, nil // still valid; nothing rotated
+	}
+
+	rotated := vault.Credential{
+		Provider:     providerName,
+		AccessToken:  fresh.AccessToken,
+		RefreshToken: fresh.RefreshToken,
+		TokenType:    fresh.TokenType,
+		Expiry:       fresh.Expiry,
+	}
+	// Some providers rotate the refresh token on use; if oauth2 did not surface a
+	// new one, keep the existing token so the next refresh still works.
+	if rotated.RefreshToken == "" {
+		rotated.RefreshToken = cred.RefreshToken
+	}
+	// Persist the rotation so the next vend starts from the fresh pair.
+	_ = h.vault.Put(ctx, userID, rotated)
+	return rotated, nil
+}
+
 // fetchUser calls the provider's user-info endpoint with the access token.
 func (h *Handler) fetchUser(ctx context.Context, p *provider, token *oauth2.Token) (map[string]any, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.userURL, nil)
