@@ -41,7 +41,9 @@ alone.
 - [ADR 0006](0006-credential-broker-not-data-broker.md): runtimes connect to
   providers directly and **transiently hold** a ZZ-vended provider credential
   for the duration of a job (the vault remains the *durable* holder). With the
-  first-slice OAuth App that credential is long-lived — a tracked limitation.
+  GitHub OAuth App that credential is long-lived — an accepted tradeoff, not a
+  stopgap: a GitHub App was ruled out because its tokens are installation-scoped
+  ([ADR 0013](0013-stay-on-github-oauth-app.md)).
 - [ADR 0007](0007-orchestrator-colocated-until-spawn.md): the orchestrator is
   co-located in the ZZ process until it gains real spawn privileges or ZZ scales
   past `replicas: 1`.

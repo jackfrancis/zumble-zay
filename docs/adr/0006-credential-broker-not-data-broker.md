@@ -38,23 +38,21 @@ ZZ is a **credential broker, not a data broker**.
 - **Blast-radius nuance (amends ADR 0002):** a runtime now *transiently* holds a
   vended provider credential for its job, rather than holding no provider token
   at all. Minimizing that exposure depends on the credential being short-lived.
-- **Known limitation / tracked improvement:** the first slice keeps the existing
-  GitHub **OAuth App**, whose user tokens are long-lived and cannot be
-  downscoped, so a compromised runtime holds a long-lived user token for its job
-  window. Planned improvement: migrate GitHub to a **GitHub App** issuing
-  expiring user-to-server tokens (refresh tokens held in the vault) so each job
-  receives a genuinely short-lived credential. **Prioritize before agents run as
-  out-of-process workloads or before onboarding untrusted agent code.**
-  - *In progress:* the **refresh-on-vend** mechanism is implemented — vend reads
-    the vault and, when the stored credential has a refresh token and has
-    expired, refreshes via the provider's OAuth token endpoint, persists the
-    rotated pair, and vends the fresh access token (`auth.Handler.Credential`
-    behind the `api.CredentialSource` seam). It is gated on a refresh token
-    being present, so it is a no-op for the current OAuth App and activates
-    automatically once a **GitHub App** (with user-token expiration enabled) is
-    registered and its client ID/secret configured — no further code change is
-    required, since the OAuth flow is identical and GitHub Apps ignore classic
-    scopes.
+- **Accepted tradeoff (see [ADR 0013](0013-stay-on-github-oauth-app.md)):** ZZ
+  keeps the GitHub **OAuth App**, whose user tokens are long-lived and cannot be
+  downscoped, so a compromised runtime transiently holds a long-lived user token
+  for its job window. A GitHub App was investigated and **ruled out**: its
+  user-to-server tokens are installation-scoped and cannot read the cross-org
+  repos the radar depends on. The exposure is bounded instead by keeping the
+  token **read-only and public-scoped**, and is mitigated by vault encryption
+  (once persisted) and revocation on logout — not by a provider migration.
+  - The generic **refresh-on-vend** mechanism is implemented — vend reads the
+    vault and, when the stored credential has a refresh token and has expired,
+    refreshes via the provider's OAuth token endpoint, persists the rotated
+    pair, and vends the fresh access token (`auth.Handler.Credential` behind the
+    `api.CredentialSource` seam). It is gated on a refresh token being present,
+    so it is a no-op for the GitHub OAuth App and remains useful for any future
+    provider (e.g. Microsoft Graph) that issues expiring user tokens.
 - Amends ADR 0001 (ZZ vends credentials; it does not proxy data) and ADR 0002
   (the vault is the *durable* holder; runtimes are *transient* holders for the
   duration of a job).

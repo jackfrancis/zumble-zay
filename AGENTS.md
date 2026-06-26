@@ -84,8 +84,10 @@ deploy/k8s/          kustomize base + dev overlay
 - Token vault encrypted at rest (KMS) once persisted. Agents connect to
   providers **directly** with a short-lived credential **vended by ZZ on demand**
   (ADR 0006); ZZ never proxies provider data. ZZ core packages must not import a
-  provider client — only agent runtimes do. (First slice uses the GitHub OAuth
-  App, so the vended token is long-lived — a tracked limitation.)
+  provider client — only agent runtimes do. (GitHub uses the OAuth App; its
+  vended token is long-lived — an accepted, read-only/public tradeoff, since a
+  GitHub App is installation-scoped and cannot serve the cross-org radar. See
+  ADR 0013.)
 - Least privilege: source scopes are READ (GitHub `repo`, Graph `Mail.Read`,
   `Chat.Read`); only ZZ metadata is WRITE.
 - Metadata writes are attributed (runtime → job → user → signals) and marked
@@ -131,10 +133,12 @@ The agentic ingestion slice is in progress: a co-located orchestrator spawns an
 ephemeral runtime that connects to GitHub **directly** with a ZZ-vended
 credential and writes results back to ZZ (ADR 0006, 0007).
 
-1. **Harden the GitHub credential (priority).** Migrate from the OAuth App
-   (long-lived user tokens) to a **GitHub App** with expiring user-to-server
-   tokens (refresh tokens in the vault) so each job gets a short-lived
-   credential. Do this before agents run out-of-process. (ADR 0006)
+1. **Harden the GitHub credential in place (ADR 0013).** A GitHub App is ruled
+   out — its user-to-server tokens are installation-scoped and cannot read the
+   cross-org repos the radar depends on. Stay on the read-only/public OAuth App
+   and bound the exposure instead: revoke the stored credential on logout, and
+   encrypt the vault at rest (lands with persistence, since the vault is
+   in-memory today).
 2. Widen GitHub coverage to private repos (`repo` scope) and more signal queries.
 3. Extract the orchestrator into its own runtime + identity once it spawns real
    workloads or ZZ scales past `replicas: 1`. (ADR 0007)
