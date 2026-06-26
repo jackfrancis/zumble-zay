@@ -148,6 +148,11 @@ type Signals struct {
 	TrendScore      float64  `json:"trend_score"`      // 0..1 external trend strength
 	DiffuseInterest float64  `json:"diffuse_interest"` // 0..1 WorkIQ partner-team interest
 
+	// Proposed holds an LLM-proposed set of axes for this item. It is an INPUT
+	// that ZZ ratifies against the deterministic baseline (docs/adr/0011), not a
+	// final score; nil when no ranker has run.
+	Proposed *AxisProposal `json:"proposed,omitempty"`
+
 	ObservedAt time.Time `json:"observed_at"` // freshness of this measurement
 }
 

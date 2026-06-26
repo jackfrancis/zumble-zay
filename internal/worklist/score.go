@@ -16,10 +16,22 @@ const (
 	wEngagement = 0.15
 )
 
+// Axis ratification bounds (docs/adr/0011). A proposal below the confidence
+// floor is ignored; otherwise each axis may move toward the proposal but no
+// further than the max deviation from its deterministic baseline.
+const (
+	axisConfidenceFloor = 0.5
+	axisMaxDeviation    = 0.4
+)
+
 // Score computes an item's ZZ Metadata from its Signals, as of now. It is a
 // pure function of the item, so a worklist can be re-scored when the weights
 // change without re-fetching from the provider (see docs/adr/0008). Origin is
 // preserved; the caller owns persistence timestamps.
+//
+// When the item carries an LLM AxisProposal, ZZ ratifies it against the
+// deterministic baseline — a confident proposal may move each axis, but only
+// within a clamp — then blends the ratified axes into Rank (docs/adr/0011).
 //
 // Time-dependent axes (Engagement, Urgency) are evaluated against now, so a
 // later read-time rescore keeps them fresh as the ADR anticipates.
@@ -30,6 +42,20 @@ func Score(item WorkItem, now time.Time) Metadata {
 	urg := urgencyScore(item.Signals, now, &contribs)
 	eng := engagementScore(item.Signals, &contribs)
 	imp := impactScore(item.Signals, &contribs)
+
+	// Ratify an LLM axis proposal against the deterministic baseline so
+	// attacker-influenced content cannot fully hijack ordering (docs/adr/0011).
+	if p := item.Signals.Proposed; p != nil && p.Confidence >= axisConfidenceFloor {
+		rel = ratifyAxis(rel, p.Relevance)
+		imp = ratifyAxis(imp, p.Impact)
+		eng = ratifyAxis(eng, p.Engagement)
+		urg = ratifyAxis(urg, p.Urgency)
+		detail := p.Rationale
+		if detail == "" {
+			detail = "LLM-ratified axes"
+		}
+		add(&contribs, "rank", "llm", p.Confidence, detail)
+	}
 
 	rank := wRelevance*rel + wUrgency*urg + wImpact*imp + wEngagement*eng
 
@@ -46,6 +72,33 @@ func Score(item WorkItem, now time.Time) Metadata {
 	}
 	m.Rationale = rationale(contribs)
 	return m
+}
+
+// baselineAxes returns the four deterministic, signal-based axis values without
+// recording contributions. It is the fallback when no proposal is ratified and
+// the reference the StubRanker echoes.
+func baselineAxes(s Signals, now time.Time) (rel, imp, eng, urg float64) {
+	var ignore []Contribution
+	rel = relevanceScore(s, &ignore)
+	urg = urgencyScore(s, now, &ignore)
+	eng = engagementScore(s, &ignore)
+	imp = impactScore(s, &ignore)
+	return rel, imp, eng, urg
+}
+
+// ratifyAxis moves the baseline toward the LLM proposal but no further than
+// axisMaxDeviation, keeping the result in [0,1].
+func ratifyAxis(baseline, proposed float64) float64 {
+	lo := math.Max(0, baseline-axisMaxDeviation)
+	hi := math.Min(1, baseline+axisMaxDeviation)
+	switch {
+	case proposed < lo:
+		return lo
+	case proposed > hi:
+		return hi
+	default:
+		return proposed
+	}
 }
 
 // relevanceScore: the strongest relationship reason wins, with a small bump for
