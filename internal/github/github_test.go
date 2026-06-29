@@ -223,3 +223,57 @@ func TestItemActivityOthersReviewedAwaitsAuthor(t *testing.T) {
 		t.Errorf("other_reviewers = %d, want 1", act.OtherReviewers)
 	}
 }
+
+// TestItemActivityMyCommentLastAwaitsOthers covers the gap the radar missed: I
+// left the LAST comment on a PR (kicking it into the author's court) with no
+// formal review event — the ball is on others even though I never "reviewed".
+func TestItemActivityMyCommentLastAwaitsOthers(t *testing.T) {
+	const me = "octocat"
+	body := `[
+	  {"event":"commented","created_at":"2026-06-20T10:00:00Z","user":{"login":"author-amy"}},
+	  {"event":"commented","created_at":"2026-06-21T10:00:00Z","user":{"login":"octocat"}}
+	]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL)
+	act, err := c.ItemActivity(context.Background(), "tok", "octo/repo", 9488, me)
+	if err != nil {
+		t.Fatalf("ItemActivity: %v", err)
+	}
+	if !act.AwaitingMeSince.IsZero() {
+		t.Errorf("awaiting-me should be zero: I had the last word, got %v", act.AwaitingMeSince)
+	}
+	if act.AwaitingOthersSince.IsZero() {
+		t.Errorf("awaiting-others should be set: my comment is the last word, ball on author")
+	}
+}
+
+// TestItemActivityOthersCommentLastIsNeutral confirms we do NOT claim the ball
+// is in others' court when someone else had the last word — it may be back on
+// me, so the signal stays neutral rather than guessing.
+func TestItemActivityOthersCommentLastIsNeutral(t *testing.T) {
+	const me = "octocat"
+	body := `[
+	  {"event":"commented","created_at":"2026-06-20T10:00:00Z","user":{"login":"octocat"}},
+	  {"event":"commented","created_at":"2026-06-21T10:00:00Z","user":{"login":"author-amy"}}
+	]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL)
+	act, err := c.ItemActivity(context.Background(), "tok", "octo/repo", 1, me)
+	if err != nil {
+		t.Fatalf("ItemActivity: %v", err)
+	}
+	if !act.AwaitingOthersSince.IsZero() {
+		t.Errorf("someone else had the last word; should not be awaiting others, got %v", act.AwaitingOthersSince)
+	}
+	if !act.AwaitingMeSince.IsZero() {
+		t.Errorf("no review requested of me; should not be awaiting me, got %v", act.AwaitingMeSince)
+	}
+}

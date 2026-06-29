@@ -267,8 +267,8 @@ type Activity struct {
 	Participants        int       // distinct people who commented or reviewed
 	InboundRefs         int       // cross-references from other issues/PRs (hub centrality)
 	OtherReviewers      int       // distinct reviewers other than login (someone else is engaged)
-	AwaitingMeSince     time.Time // when login was asked to review with no review since; zero if none
-	AwaitingOthersSince time.Time // when forward progress is on the author/others (a review landed, or login reviewed); zero if none
+	AwaitingMeSince     time.Time // when login was asked to review with no engagement since; zero if none
+	AwaitingOthersSince time.Time // when the ball is in others' court (login had the last word, or a decisive review landed); zero if none
 }
 
 // ItemActivity reads one page of the issue/PR timeline and derives the
@@ -282,33 +282,47 @@ func (c *Client) ItemActivity(ctx context.Context, token, repo string, number in
 	participants := make(map[string]struct{})
 	otherReviewers := make(map[string]struct{})
 	var inbound int
-	var requestedAt, reviewedAt, latestReviewAt time.Time
-	var latestReviewState string
+	// requestedAt: latest review explicitly requested of login. myLastActivityAt:
+	// latest comment or review by login. lastActor/lastActivityAt: the most recent
+	// voice on the thread, and lastActivityDecisive records whether that voice was
+	// a formal review (changes requested / approved).
+	var requestedAt, myLastActivityAt, lastActivityAt time.Time
+	var lastActor string
+	var lastActivityDecisive bool
 	for _, e := range events {
 		switch e.Event {
 		case "commented":
-			if l := eventLogin(e); l != "" {
-				participants[l] = struct{}{}
+			l := eventLogin(e)
+			if l == "" {
+				break
+			}
+			participants[l] = struct{}{}
+			if e.CreatedAt.After(lastActivityAt) {
+				lastActivityAt, lastActor, lastActivityDecisive = e.CreatedAt, l, false
+			}
+			if l == login && e.CreatedAt.After(myLastActivityAt) {
+				myLastActivityAt = e.CreatedAt
 			}
 		case "reviewed":
-			if e.User != nil && e.User.Login != "" {
-				participants[e.User.Login] = struct{}{}
-				at := e.SubmittedAt
-				if at.IsZero() {
-					at = e.CreatedAt
+			if e.User == nil || e.User.Login == "" {
+				break
+			}
+			l := e.User.Login
+			participants[l] = struct{}{}
+			at := e.SubmittedAt
+			if at.IsZero() {
+				at = e.CreatedAt
+			}
+			if at.After(lastActivityAt) {
+				lastActivityAt, lastActor = at, l
+				lastActivityDecisive = e.State == "changes_requested" || e.State == "approved"
+			}
+			if l == login {
+				if at.After(myLastActivityAt) {
+					myLastActivityAt = at
 				}
-				if e.User.Login == login {
-					if at.After(reviewedAt) {
-						reviewedAt = at
-					}
-				} else {
-					otherReviewers[e.User.Login] = struct{}{}
-				}
-				// Track the most recent review across everyone, to tell whose
-				// court the ball is in.
-				if at.After(latestReviewAt) {
-					latestReviewAt, latestReviewState = at, e.State
-				}
+			} else {
+				otherReviewers[l] = struct{}{}
 			}
 		case "cross-referenced":
 			inbound++
@@ -319,18 +333,27 @@ func (c *Client) ItemActivity(ctx context.Context, token, repo string, number in
 		}
 	}
 	a := Activity{Participants: len(participants), InboundRefs: inbound, OtherReviewers: len(otherReviewers)}
+
+	// Decide whose court the ball is in from the most recent court-changing event.
+	// Ball on login: a review was requested of them and they have not engaged
+	// (commented or reviewed) since. Ball on others: login had the last word, or
+	// someone's decisive review is the last word so progress is on the author —
+	// even when login never formally reviewed (docs/adr/0015).
+	var meSince, othersSince time.Time
+	if !requestedAt.IsZero() && requestedAt.After(myLastActivityAt) {
+		meSince = requestedAt
+	}
 	switch {
-	case !requestedAt.IsZero() && !reviewedAt.After(requestedAt):
-		// A review was requested of login and not yet done: the ball is on login.
-		a.AwaitingMeSince = requestedAt
-	case latestReviewState == "changes_requested" || latestReviewState == "approved":
-		// Someone formally reviewed (changes requested, or approved): forward
-		// progress is on the author/maintainer, not login — even when login never
-		// reviewed (a passive assignee). docs/adr/0015.
-		a.AwaitingOthersSince = latestReviewAt
-	case !reviewedAt.IsZero():
-		// login reviewed and has no outstanding ask: the ball is off login.
-		a.AwaitingOthersSince = reviewedAt
+	case lastActor == login && !myLastActivityAt.IsZero():
+		othersSince = myLastActivityAt
+	case lastActivityDecisive:
+		othersSince = lastActivityAt
+	}
+	switch {
+	case meSince.After(othersSince):
+		a.AwaitingMeSince = meSince
+	case !othersSince.IsZero():
+		a.AwaitingOthersSince = othersSince
 	}
 	return a, nil
 }
