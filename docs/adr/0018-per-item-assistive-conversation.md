@@ -60,3 +60,23 @@ Add a **read-only, assistive** per-item conversation.
   read credential + the provider client (a runtime concern), and it is the
   attacker-controllable surface — so it pairs with the discovery/injection design
   (ADR 0015), not this first read-only slice.
+
+## Addendum — read receipts & the unread cue (2026-06-28)
+
+Replies arrive asynchronously (ADR 0019) and the user often leaves the thread
+before one lands, so the radar needs to flag threads with a response not yet
+seen.
+
+- **Data:** `WorkItem.ThreadReadAt time.Time` records when the owner last read
+  the thread; `WorkItem.HasUnreadReply()` is true when the latest agent reply is
+  newer than it (a pending user turn is not "unread"). Preserved across re-ingest
+  alongside `Thread`, so a re-rank never falsely re-flags a read thread.
+- **Receipt:** `POST /api/thread/read?id=` stamps `ThreadReadAt` — owner-scoped,
+  idempotent, **not** gated on the assistant being enabled (reading is always
+  allowed). The page fires it best-effort 3s after a reply is on screen, so a
+  glance under that dwell stays flagged — matching the "things I still need to go
+  back to" intent.
+- **Cue:** the Discuss affordance now has three states — plain (no thread),
+  `✨ active` (read), and `✨ active + dot` (unread reply) — driven by
+  `.Thread` and `.HasUnreadReply`.
+

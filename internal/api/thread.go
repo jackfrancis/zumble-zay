@@ -179,6 +179,38 @@ func (h *ThreadHandler) Resume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"pending": true})
 }
 
+// MarkRead handles POST /api/thread/read?id=<item id>. It records that the owner
+// has seen the thread's latest reply by stamping ThreadReadAt, clearing the
+// radar's unread cue (docs/adr/0018). It is owner-scoped and idempotent, and is
+// not gated on the assistant being enabled — reading is always allowed.
+func (h *ThreadHandler) MarkRead(w http.ResponseWriter, r *http.Request) {
+	p, ok := principal.FromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "item id required")
+		return
+	}
+	item, found, err := findItem(r.Context(), h.store, p.ActingUserID, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load item")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "item not found")
+		return
+	}
+	item.ThreadReadAt = h.now().UTC()
+	if err := h.store.Upsert(r.Context(), p.ActingUserID, item); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save read receipt")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Get handles GET /api/thread?id=<item id>. It returns the owner's current
 // thread for the item so the page can poll for the asynchronous reply.
 func (h *ThreadHandler) Get(w http.ResponseWriter, r *http.Request) {

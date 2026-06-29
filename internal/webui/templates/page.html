@@ -73,7 +73,11 @@
             <div class="zz-item-actions">
               {{if $.ConvEnabled}}
                 {{if .Thread}}
-                <a class="btn btn-sm zz-discuss zz-discuss--active" href="/items/thread?id={{.ID | urlquery}}" title="Has an AI discussion ({{len .Thread}} messages)">&#10024; Discuss</a>
+                  {{if .HasUnreadReply}}
+                  <a class="btn btn-sm zz-discuss zz-discuss--unread" href="/items/thread?id={{.ID | urlquery}}" title="New assistant reply to read ({{len .Thread}} messages)">&#10024; Discuss <span class="zz-unread-dot" aria-label="unread"></span></a>
+                  {{else}}
+                  <a class="btn btn-sm zz-discuss zz-discuss--active" href="/items/thread?id={{.ID | urlquery}}" title="Has an AI discussion ({{len .Thread}} messages)">&#10024; Discuss</a>
+                  {{end}}
                 {{else}}
                 <a class="btn btn-sm zz-discuss" href="/items/thread?id={{.ID | urlquery}}">Discuss</a>
                 {{end}}

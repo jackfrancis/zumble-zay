@@ -80,6 +80,7 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	mux.Handle("POST /api/thread", authenticator.RequireAuth(http.HandlerFunc(threadHandler.Post)))
 	mux.Handle("GET /api/thread", authenticator.RequireAuth(http.HandlerFunc(threadHandler.Get)))
 	mux.Handle("POST /api/thread/resume", authenticator.RequireAuth(http.HandlerFunc(threadHandler.Resume)))
+	mux.Handle("POST /api/thread/read", authenticator.RequireAuth(http.HandlerFunc(threadHandler.MarkRead)))
 
 	// Auth lifecycle.
 	mux.HandleFunc("GET /auth/providers", func(w http.ResponseWriter, r *http.Request) {

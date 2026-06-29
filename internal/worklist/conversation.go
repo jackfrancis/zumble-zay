@@ -12,6 +12,20 @@ const (
 	RoleAgent = "agent"
 )
 
+// HasUnreadReply reports whether the item's most recent agent reply is newer
+// than when the owner last read the thread (ThreadReadAt) — i.e. there is a
+// response the user has not seen. It drives the radar's "unread" Discuss cue
+// (docs/adr/0018). A thread whose last turn is still the user's (reply pending)
+// is not unread; there is nothing new to read yet.
+func (w WorkItem) HasUnreadReply() bool {
+	for i := len(w.Thread) - 1; i >= 0; i-- {
+		if w.Thread[i].Role == RoleAgent {
+			return w.Thread[i].At.After(w.ThreadReadAt)
+		}
+	}
+	return false
+}
+
 // Message is one turn in an item's assistive conversation thread, retained on
 // the WorkItem (docs/adr/0018). Role is RoleUser or RoleAgent.
 type Message struct {

@@ -34,6 +34,15 @@
 
   var POLL_MS = 1800;
   var MAX_POLLS = 80; // ~2.4 min, covering the converse job budget
+  var READ_DELAY_MS = 3000; // dwell before a reply counts as read (ADR 0018)
+
+  // Register a read receipt for the latest reply once it has been on screen long
+  // enough to have been seen; this clears the radar's unread cue. Fire-and-forget.
+  function scheduleRead() {
+    window.setTimeout(function () {
+      fetch("/api/thread/read?id=" + encodeURIComponent(itemId), { method: "POST" }).catch(function () {});
+    }, READ_DELAY_MS);
+  }
 
   function addMessage(role, text) {
     var el = document.createElement("div");
@@ -73,6 +82,7 @@
           pending.scrollIntoView({ block: "nearest" });
           serverCount = msgs.length;
           done();
+          scheduleRead();
           return;
         }
         if (attempts + 1 >= MAX_POLLS) {
@@ -135,5 +145,8 @@
       .then(function () {
         poll(resumed, 0);
       });
+  } else if (lastRendered && lastRendered.classList.contains("zz-msg--agent")) {
+    // Already-rendered reply: dwell, then mark it read so the radar cue clears.
+    scheduleRead();
   }
 })();

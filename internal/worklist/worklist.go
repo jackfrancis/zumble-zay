@@ -104,16 +104,20 @@ type Contribution struct {
 
 // WorkItem is one unit of work owned by a user.
 type WorkItem struct {
-	ID        string    `json:"id"`
-	OwnerID   string    `json:"owner_id"`
-	Source    string    `json:"source"` // "github"
-	Type      ItemType  `json:"type"`
-	GitHub    GitHubRef `json:"github"`
-	Signals   Signals   `json:"signals"`          // observed facts that feed scoring
-	Meta      Metadata  `json:"zz"`               // ZZ's judgment derived from Signals
-	Thread    []Message `json:"thread,omitempty"` // assistive conversation (ADR 0018)
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID      string    `json:"id"`
+	OwnerID string    `json:"owner_id"`
+	Source  string    `json:"source"` // "github"
+	Type    ItemType  `json:"type"`
+	GitHub  GitHubRef `json:"github"`
+	Signals Signals   `json:"signals"`          // observed facts that feed scoring
+	Meta    Metadata  `json:"zz"`               // ZZ's judgment derived from Signals
+	Thread  []Message `json:"thread,omitempty"` // assistive conversation (ADR 0018)
+	// ThreadReadAt is when the owner last read the thread; zero means never. An
+	// agent reply newer than this is "unread", so the radar can flag threads with
+	// a response the user hasn't seen yet (docs/adr/0018).
+	ThreadReadAt time.Time `json:"thread_read_at,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // Signals are the observed FACTS about an item — measured, not judged. They are

@@ -62,6 +62,7 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	prevHidden := make(map[string]time.Time, len(existing))
 	prevThread := make(map[string][]worklist.Message, len(existing))
+	prevReadAt := make(map[string]time.Time, len(existing))
 	prevResearch := make(map[string]*worklist.ResearchAdjustment, len(existing))
 	for _, it := range existing {
 		if !it.Meta.HiddenAt.IsZero() {
@@ -69,6 +70,9 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(it.Thread) > 0 {
 			prevThread[it.ID] = it.Thread
+		}
+		if !it.ThreadReadAt.IsZero() {
+			prevReadAt[it.ID] = it.ThreadReadAt
 		}
 		if it.Signals.Research != nil {
 			prevResearch[it.ID] = it.Signals.Research
@@ -93,6 +97,9 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		// Preserve the assistive conversation across re-ingest (docs/adr/0018);
 		// agents never author it, so the stored thread is authoritative.
 		req.Items[i].Thread = prevThread[req.Items[i].ID]
+		// Carry the read receipt too, so a re-rank does not falsely flag a read
+		// thread as unread (docs/adr/0018).
+		req.Items[i].ThreadReadAt = prevReadAt[req.Items[i].ID]
 		if req.Items[i].CreatedAt.IsZero() {
 			req.Items[i].CreatedAt = now
 		}

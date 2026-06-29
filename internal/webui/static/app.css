@@ -45,6 +45,21 @@ a:hover { text-decoration: underline; }
   color: var(--fgColor-accent, #0969da);
   font-weight: 600;
 }
+/* Unread: like --active, plus a dot flagging an assistant reply not yet read. */
+.zz-discuss--unread {
+  border-color: var(--borderColor-accent-emphasis, #0969da);
+  color: var(--fgColor-accent, #0969da);
+  font-weight: 600;
+}
+.zz-unread-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 2px;
+  border-radius: 50%;
+  background: var(--bgColor-attention-emphasis, #9a6700);
+  vertical-align: middle;
+}
 .zz-title { font-size: 16px; font-weight: 600; }
 .zz-meta { color: var(--fgColor-muted, #59636e); font-size: 12px; margin-top: 4px; }
 .zz-meta > * { margin-right: 6px; }
