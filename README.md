@@ -42,72 +42,34 @@ internal/server/     # router + middleware
 
 ## Getting started
 
-There are two ways to run zumble-zay locally:
-
-- **On Kubernetes (recommended)** — mirrors how it runs in production; one
-  command: `make dev-up`. See [Develop on Kubernetes (kind)](#develop-on-kubernetes-kind).
-- **As a plain Go process** — the lightweight loop described below.
-
-### Run as a Go process
-
-1. Copy the environment template and fill in your values:
-
-   ```sh
-   cp .env.example .env
-   ```
-
-2. Generate a session secret:
-
-   ```sh
-   openssl rand -base64 48
-   ```
-
-   Put the result in `SESSION_SECRET`.
-
-3. Register OAuth applications and set the redirect URI for each provider to
-   `${BASE_URL}/auth/<provider>/callback`, e.g.
-   `http://localhost:8080/auth/github/callback`. Only providers you configure
-   are enabled.
-
-4. Load the environment and run:
-
-   ```sh
-   set -a; source .env; set +a
-   make run
-   ```
-
-## API
-
-| Method | Path                       | Auth | Description                  |
-| ------ | -------------------------- | ---- | ---------------------------- |
-| GET    | `/healthz`                 | no   | Health check                 |
-| GET    | `/auth/providers`          | no   | List enabled providers       |
-| GET    | `/auth/{provider}/login`   | no   | Begin OAuth login            |
-| GET    | `/auth/{provider}/callback`| no   | OAuth redirect target        |
-| POST   | `/auth/logout`             | no   | Destroy the current session  |
-| GET    | `/api/me`                  | yes  | Current authenticated user   |
-| GET    | `/api/worklist`            | yes  | Ordered set of work items    |
-
-Domain endpoints (GitHub data retrieval and Zumble-Zay metadata) are layered
-on this foundation as they are built.
-
-## Development
+The primary dev loop runs zumble-zay the **same way it runs in production —
+inside Kubernetes** — using a local [kind](https://kind.sigs.k8s.io) cluster, so
+you catch container, manifest, and config issues immediately. One command stands
+it up:
 
 ```sh
-make test   # run tests
-make vet    # static analysis
-make build  # compile to bin/server
+make dev-up        # build image → create kind cluster → load → apply → ready
+make dev-forward   # port-forward the service to localhost:8080  (blocks)
 ```
+
+Then, in another shell:
+
+```sh
+curl localhost:8080/healthz          # {"status":"ok"}
+curl localhost:8080/auth/providers   # enabled OAuth providers
+```
+
+Full details — prerequisites, iterating, enabling OAuth, teardown — are in
+[Develop on Kubernetes (kind)](#develop-on-kubernetes-kind). Prefer a bare
+process for a quick check? See [Run as a plain Go process](#run-as-a-plain-go-process-alternative).
 
 ## Develop on Kubernetes (kind)
 
-The primary dev loop runs the app the same way it runs in production — in
-Kubernetes — using a local [kind](https://kind.sigs.k8s.io) cluster. A hardened
-container ([Dockerfile](Dockerfile), distroless/non-root/static) and kustomize
-manifests under [deploy/k8s](deploy/k8s) deploy the backend. The Dockerfile uses
-no BuildKit-only features, so it builds identically with Docker or Podman, and
-the `make` targets auto-detect the engine (Podman preferred on macOS, Docker
-otherwise — override with `CONTAINER_ENGINE=docker`).
+A hardened container ([Dockerfile](Dockerfile), distroless/non-root/static) and
+kustomize manifests under [deploy/k8s](deploy/k8s) deploy the backend. The
+Dockerfile uses no BuildKit-only features, so it builds identically with Docker
+or Podman, and the `make` targets auto-detect the engine (Podman preferred on
+macOS, Docker otherwise — override with `CONTAINER_ENGINE=docker`).
 
 ### Prerequisites
 
@@ -166,6 +128,17 @@ Set each provider's OAuth redirect URI to `${BASE_URL}/auth/<provider>/callback`
 make dev-down      # delete the kind cluster
 ```
 
+### Run as a plain Go process (alternative)
+
+For a quick, dependency-light check that skips containers and Kubernetes:
+
+1. Copy the environment template and fill in your values: `cp .env.example .env`.
+2. Generate a session secret (`openssl rand -base64 48`) into `SESSION_SECRET`.
+3. Register OAuth apps with redirect URI `${BASE_URL}/auth/<provider>/callback`
+   (e.g. `http://localhost:8080/auth/github/callback`); only configured
+   providers are enabled.
+4. Load the environment and run: `set -a; source .env; set +a && make run`.
+
 ### Notes
 
 - State (sessions, worklist) is in-memory today, so the Deployment runs
@@ -175,6 +148,29 @@ make dev-down      # delete the kind cluster
   port-forward (`COOKIE_SECURE=false`). The `base` is production-shaped (TLS
   Ingress, `COOKIE_SECURE=true`); override `BASE_URL`, the Ingress host, and the
   TLS secret per environment.
+
+## API
+
+| Method | Path                       | Auth | Description                  |
+| ------ | -------------------------- | ---- | ---------------------------- |
+| GET    | `/healthz`                 | no   | Health check                 |
+| GET    | `/auth/providers`          | no   | List enabled providers       |
+| GET    | `/auth/{provider}/login`   | no   | Begin OAuth login            |
+| GET    | `/auth/{provider}/callback`| no   | OAuth redirect target        |
+| POST   | `/auth/logout`             | no   | Destroy the current session  |
+| GET    | `/api/me`                  | yes  | Current authenticated user   |
+| GET    | `/api/worklist`            | yes  | Ordered set of work items    |
+
+Domain endpoints (GitHub data retrieval and Zumble-Zay metadata) are layered
+on this foundation as they are built.
+
+## Development
+
+```sh
+make test   # run tests
+make vet    # static analysis
+make build  # compile to bin/server
+```
 
 ## Roadmap
 
