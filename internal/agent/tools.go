@@ -37,7 +37,8 @@ var (
 	schemaReadFile = json.RawMessage(`{"type":"object","properties":{` +
 		`"repo":{"type":"string","description":"owner/name; defaults to the current item's repository"},` +
 		`"path":{"type":"string","description":"file path within the repository, e.g. cluster-autoscaler/go.mod"},` +
-		`"ref":{"type":"string","description":"branch, tag, or commit SHA; defaults to the repository's default branch"}` +
+		`"ref":{"type":"string","description":"branch, tag, or commit SHA; defaults to the repository's default branch"},` +
+		`"offset":{"type":"integer","description":"byte offset to start reading from; pass the offset reported by a previous read to page through a file larger than one window (default 0)"}` +
 		`},"required":["path"]}`)
 
 	schemaGetPR = json.RawMessage(`{"type":"object","properties":{` +
@@ -60,7 +61,7 @@ func (t *githubToolBox) Definitions() []worklist.ToolDef {
 	return []worklist.ToolDef{
 		{
 			Name:        "github_read_file",
-			Description: "Read a file's contents from a GitHub repository at a given ref (branch, tag, or commit SHA). Use to check current dependency versions, config, or code on a branch such as master/main — e.g. whether go.mod already bumped a dependency.",
+			Description: "Read a file's contents from a GitHub repository at a given ref (branch, tag, or commit SHA). Use to check current dependency versions, config, or code on a branch such as master/main — e.g. whether go.mod already bumped a dependency. Returns up to a 32 KB window; if the file is larger, the result reports the file size and a follow-up offset — call again with that offset to read further.",
 			Parameters:  schemaReadFile,
 		},
 		{
@@ -88,9 +89,10 @@ func (t *githubToolBox) Invoke(ctx context.Context, name string, args json.RawMe
 	switch name {
 	case "github_read_file":
 		var a struct {
-			Repo string `json:"repo"`
-			Path string `json:"path"`
-			Ref  string `json:"ref"`
+			Repo   string `json:"repo"`
+			Path   string `json:"path"`
+			Ref    string `json:"ref"`
+			Offset int    `json:"offset"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil {
 			return "", fmt.Errorf("bad arguments: %w", err)
@@ -98,7 +100,7 @@ func (t *githubToolBox) Invoke(ctx context.Context, name string, args json.RawMe
 		if a.Path == "" {
 			return "", fmt.Errorf("path is required")
 		}
-		return t.gh.FileContents(ctx, t.token, t.repoOr(a.Repo), a.Path, a.Ref)
+		return t.gh.FileContents(ctx, t.token, t.repoOr(a.Repo), a.Path, a.Ref, a.Offset)
 
 	case "github_get_pull_request":
 		var a struct {

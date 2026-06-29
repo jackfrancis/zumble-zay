@@ -488,15 +488,17 @@ func truncateRunes(s string, max int) string {
 // user's vended credential and only ever GET; access is bounded by the token's
 // own scopes (a repo it cannot see returns an error the caller surfaces).
 const (
-	maxFileBytes     = 32 << 10 // decoded file text returned to the model
+	maxFileBytes     = 32 << 10 // decoded file text returned per read; a window, paged via offset
 	maxSearchResults = 20       // search matches returned to the model
 )
 
 // FileContents reads a file from a repo at an optional ref (branch/tag/SHA;
-// empty uses the default branch) and returns its decoded text, bounded. A path
-// that resolves to a directory, a binary blob, or an unreadable object returns a
-// short explanatory note rather than an error, so the assistant can react.
-func (c *Client) FileContents(ctx context.Context, token, repo, path, ref string) (string, error) {
+// empty uses the default branch) and returns its decoded text, bounded to a
+// maxFileBytes window starting at offset so the model can page through a file
+// larger than one window. A path that resolves to a directory, a binary blob, or
+// an unreadable object returns a short explanatory note rather than an error, so
+// the assistant can react.
+func (c *Client) FileContents(ctx context.Context, token, repo, path, ref string, offset int) (string, error) {
 	p := fmt.Sprintf("/repos/%s/contents/%s", repo, path)
 	if ref != "" {
 		p += "?ref=" + url.QueryEscape(ref)
@@ -524,7 +526,51 @@ func (c *Client) FileContents(ctx context.Context, token, repo, path, ref string
 	if !utf8.Valid(raw) {
 		return "(binary file omitted)", nil
 	}
-	return truncateRunes(string(raw), maxFileBytes), nil
+	return fileWindow(string(raw), offset), nil
+}
+
+// fileWindow returns the maxFileBytes-sized slice of text beginning at offset,
+// aligned to UTF-8 boundaries and framed with markers that report the file's
+// total size and the exact offset to request next, so the model can page through
+// a file larger than one window. offset is clamped into range, so an
+// out-of-range value from the model is harmless; a file that fits in one window
+// from the start is returned verbatim with no markers.
+func fileWindow(text string, offset int) string {
+	total := len(text)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	for offset < total && !utf8.RuneStart(text[offset]) {
+		offset++
+	}
+	end := offset + maxFileBytes
+	if end > total {
+		end = total
+	}
+	for end > offset && !utf8.ValidString(text[offset:end]) {
+		end--
+	}
+	window := text[offset:end]
+	if offset == 0 && end == total {
+		return window
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "(file is %d bytes; showing %d-%d", total, offset, end)
+	if end < total {
+		fmt.Fprintf(&b, "; request offset %d to continue", end)
+	}
+	b.WriteString(")\n")
+	if offset > 0 {
+		b.WriteString("…\n")
+	}
+	b.WriteString(window)
+	if end < total {
+		b.WriteString("\n… (truncated; more below)")
+	}
+	return b.String()
 }
 
 // PullRequestStatus returns a pull request's current state (open/closed, merged

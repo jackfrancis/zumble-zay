@@ -27,7 +27,7 @@ func TestFileContentsDecodesBase64(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL)
-	got, err := c.FileContents(context.Background(), "tok", "kubernetes/autoscaler", "cluster-autoscaler/go.mod", "master")
+	got, err := c.FileContents(context.Background(), "tok", "kubernetes/autoscaler", "cluster-autoscaler/go.mod", "master", 0)
 	if err != nil {
 		t.Fatalf("FileContents: %v", err)
 	}
@@ -50,12 +50,50 @@ func TestFileContentsDirectoryIsNotAnError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.Client(), srv.URL)
-	got, err := c.FileContents(context.Background(), "tok", "o/r", "dir", "")
+	got, err := c.FileContents(context.Background(), "tok", "o/r", "dir", "", 0)
 	if err != nil {
 		t.Fatalf("FileContents: %v", err)
 	}
 	if !strings.Contains(got, "directory") {
 		t.Errorf("expected a directory note, got %q", got)
+	}
+}
+
+// TestFileContentsPagesLargeFileWithOffset proves a file larger than one window
+// is reachable in full via offset paging: page 1 reports the file size and the
+// next offset; page 2 returns the remainder. Plain ASCII so byte offsets equal
+// rune offsets.
+func TestFileContentsPagesLargeFileWithOffset(t *testing.T) {
+	fileText := strings.Repeat("A", 32<<10) + strings.Repeat("B", 4096) // 36864 bytes
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		enc := base64.StdEncoding.EncodeToString([]byte(fileText))
+		fmt.Fprintf(w, `{"type":"file","encoding":"base64","content":%q}`, enc)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL)
+
+	page1, err := c.FileContents(context.Background(), "tok", "o/r", "big.txt", "", 0)
+	if err != nil {
+		t.Fatalf("FileContents page 1: %v", err)
+	}
+	if !strings.Contains(page1, "request offset 32768 to continue") {
+		t.Fatalf("page 1 missing continuation marker")
+	}
+	if strings.Contains(page1, "B") {
+		t.Errorf("page 1 should not include the second half")
+	}
+
+	page2, err := c.FileContents(context.Background(), "tok", "o/r", "big.txt", "", 32<<10)
+	if err != nil {
+		t.Fatalf("FileContents page 2: %v", err)
+	}
+	if !strings.Contains(page2, "showing 32768-36864") {
+		t.Errorf("page 2 missing window marker")
+	}
+	if !strings.Contains(page2, "BBBB") || strings.Contains(page2, "AAAA") {
+		t.Errorf("page 2 should contain only the second half")
 	}
 }
 

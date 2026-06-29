@@ -69,9 +69,11 @@ func NewConverser(cfg Config) *Converser {
 const maxToolIterations = 6
 
 // maxToolResultBytes bounds a single tool result fed back to the model, so a
-// large file or search response cannot blow up the prompt while still leaving
-// room for a sizeable go.mod or file (docs/adr/0020).
-const maxToolResultBytes = 32 << 10
+// large file or search response cannot blow up the prompt. It is kept above the
+// file-read window (github.maxFileBytes, 32 KiB) so a full page plus its paging
+// markers is never clipped here; reading a large file is bounded instead by
+// paging across at most maxToolIterations rounds (docs/adr/0020).
+const maxToolResultBytes = 64 << 10
 
 // Reply produces the assistant's next turn from the item context, any freshly
 // fetched (untrusted) source context, the prior thread, and the user's new

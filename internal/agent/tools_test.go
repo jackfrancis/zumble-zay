@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -57,5 +59,27 @@ func TestGitHubToolBoxInvoke(t *testing.T) {
 
 	if len(paths) < 2 || !strings.HasPrefix(paths[0], "/repos/octo/repo/contents/go.mod") {
 		t.Fatalf("repo default not applied; paths=%v", paths)
+	}
+}
+
+// TestGitHubToolBoxReadFileOffset proves the offset argument threads through the
+// tool to FileContents, so the model can page past the first window of a large
+// file (the file-size cutoff a reviewer hit on a long test file).
+func TestGitHubToolBoxReadFileOffset(t *testing.T) {
+	fileText := strings.Repeat("A", 32<<10) + strings.Repeat("B", 1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		enc := base64.StdEncoding.EncodeToString([]byte(fileText))
+		fmt.Fprintf(w, `{"type":"file","encoding":"base64","content":%q}`, enc)
+	}))
+	defer srv.Close()
+
+	box := newGitHubToolBox(github.NewClient(srv.Client(), srv.URL), "tok", "octo/repo")
+	out, err := box.Invoke(context.Background(), "github_read_file", json.RawMessage(`{"path":"big.go","offset":32768}`))
+	if err != nil {
+		t.Fatalf("read_file offset: %v", err)
+	}
+	if !strings.Contains(out, "BBBB") || strings.Contains(out, "AAAA") {
+		t.Fatalf("offset window wrong (len %d)", len(out))
 	}
 }
