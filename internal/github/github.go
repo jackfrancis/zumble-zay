@@ -248,6 +248,7 @@ func (c *Client) Login(ctx context.Context, token string) (string, error) {
 
 type timelineEvent struct {
 	Event             string    `json:"event"`
+	State             string    `json:"state"` // for "reviewed": approved | changes_requested | commented | dismissed
 	CreatedAt         time.Time `json:"created_at"`
 	SubmittedAt       time.Time `json:"submitted_at"`
 	RequestedReviewer *struct {
@@ -263,9 +264,11 @@ type timelineEvent struct {
 
 // Activity holds the signals derived from a single read of an item's timeline.
 type Activity struct {
-	Participants    int       // distinct people who commented or reviewed
-	InboundRefs     int       // cross-references from other issues/PRs (hub centrality)
-	AwaitingMeSince time.Time // when login was asked to review with no review since; zero if none
+	Participants        int       // distinct people who commented or reviewed
+	InboundRefs         int       // cross-references from other issues/PRs (hub centrality)
+	OtherReviewers      int       // distinct reviewers other than login (someone else is engaged)
+	AwaitingMeSince     time.Time // when login was asked to review with no review since; zero if none
+	AwaitingOthersSince time.Time // when forward progress is on the author/others (a review landed, or login reviewed); zero if none
 }
 
 // ItemActivity reads one page of the issue/PR timeline and derives the
@@ -277,8 +280,10 @@ func (c *Client) ItemActivity(ctx context.Context, token, repo string, number in
 		return Activity{}, err
 	}
 	participants := make(map[string]struct{})
+	otherReviewers := make(map[string]struct{})
 	var inbound int
-	var requestedAt, reviewedAt time.Time
+	var requestedAt, reviewedAt, latestReviewAt time.Time
+	var latestReviewState string
 	for _, e := range events {
 		switch e.Event {
 		case "commented":
@@ -288,14 +293,21 @@ func (c *Client) ItemActivity(ctx context.Context, token, repo string, number in
 		case "reviewed":
 			if e.User != nil && e.User.Login != "" {
 				participants[e.User.Login] = struct{}{}
+				at := e.SubmittedAt
+				if at.IsZero() {
+					at = e.CreatedAt
+				}
 				if e.User.Login == login {
-					at := e.SubmittedAt
-					if at.IsZero() {
-						at = e.CreatedAt
-					}
 					if at.After(reviewedAt) {
 						reviewedAt = at
 					}
+				} else {
+					otherReviewers[e.User.Login] = struct{}{}
+				}
+				// Track the most recent review across everyone, to tell whose
+				// court the ball is in.
+				if at.After(latestReviewAt) {
+					latestReviewAt, latestReviewState = at, e.State
 				}
 			}
 		case "cross-referenced":
@@ -306,9 +318,19 @@ func (c *Client) ItemActivity(ctx context.Context, token, repo string, number in
 			}
 		}
 	}
-	a := Activity{Participants: len(participants), InboundRefs: inbound}
-	if !requestedAt.IsZero() && !reviewedAt.After(requestedAt) {
+	a := Activity{Participants: len(participants), InboundRefs: inbound, OtherReviewers: len(otherReviewers)}
+	switch {
+	case !requestedAt.IsZero() && !reviewedAt.After(requestedAt):
+		// A review was requested of login and not yet done: the ball is on login.
 		a.AwaitingMeSince = requestedAt
+	case latestReviewState == "changes_requested" || latestReviewState == "approved":
+		// Someone formally reviewed (changes requested, or approved): forward
+		// progress is on the author/maintainer, not login — even when login never
+		// reviewed (a passive assignee). docs/adr/0015.
+		a.AwaitingOthersSince = latestReviewAt
+	case !reviewedAt.IsZero():
+		// login reviewed and has no outstanding ask: the ball is off login.
+		a.AwaitingOthersSince = reviewedAt
 	}
 	return a, nil
 }

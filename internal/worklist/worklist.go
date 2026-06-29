@@ -137,6 +137,7 @@ type Signals struct {
 	Reactions         int     `json:"reactions"`
 	InfluentialActors int     `json:"influential_actors"` // distinct maintainers/TOC/SIG-leads engaged
 	InboundRefs       int     `json:"inbound_refs"`       // other issues/PRs linking here (hub centrality)
+	OtherReviewers    int     `json:"other_reviewers"`    // distinct reviewers other than me (someone else is already engaged)
 	CommentVelocity   float64 `json:"comment_velocity"`   // comments/day, smoothed
 	CommentAccel      float64 `json:"comment_accel"`      // Δ velocity vs prior window (the heatmap derivative)
 
@@ -144,8 +145,12 @@ type Signals struct {
 	OpenedAt        time.Time `json:"opened_at"`
 	LastActivityAt  time.Time `json:"last_activity_at"`
 	AwaitingMeSince time.Time `json:"awaiting_me_since"` // zero = no outstanding ask on me
-	DeadlineAt      time.Time `json:"deadline_at"`       // release/freeze/KEP; zero = none
-	Reopened        bool      `json:"reopened"`
+	// AwaitingOthersSince is set when the user has acted (e.g. reviewed) and
+	// forward progress is now blocked on the author or a third party — the "ball
+	// is in their court". Zero = not waiting on others (docs/adr/0015).
+	AwaitingOthersSince time.Time `json:"awaiting_others_since"`
+	DeadlineAt          time.Time `json:"deadline_at"` // release/freeze/KEP; zero = none
+	Reopened            bool      `json:"reopened"`
 
 	// Strategic context.
 	RepoTier      int      `json:"repo_tier"` // config-driven strategic weight bucket

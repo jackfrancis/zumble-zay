@@ -195,7 +195,7 @@ type fakeConverser struct {
 	gotContext chan string
 }
 
-func (f *fakeConverser) Reply(_ context.Context, _ worklist.WorkItem, sourceContext string, _ []worklist.Message, userText string, _ worklist.ToolBox) (string, error) {
+func (f *fakeConverser) Reply(_ context.Context, _ worklist.WorkItem, _ string, sourceContext string, _ []worklist.Message, userText string, _ worklist.ToolBox) (string, error) {
 	select {
 	case f.gotContext <- sourceContext:
 	default:

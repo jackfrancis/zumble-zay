@@ -285,12 +285,16 @@ func runEnrich(ctx context.Context, p RunParams) error {
 				return // best-effort: leave the item's signals unchanged
 			}
 			s := &items[i].Signals
-			if act.Participants == s.Participants && act.InboundRefs == s.InboundRefs && act.AwaitingMeSince.Equal(s.AwaitingMeSince) {
+			if act.Participants == s.Participants && act.InboundRefs == s.InboundRefs &&
+				act.OtherReviewers == s.OtherReviewers &&
+				act.AwaitingMeSince.Equal(s.AwaitingMeSince) && act.AwaitingOthersSince.Equal(s.AwaitingOthersSince) {
 				return
 			}
 			s.Participants = act.Participants
 			s.InboundRefs = act.InboundRefs
+			s.OtherReviewers = act.OtherReviewers
 			s.AwaitingMeSince = act.AwaitingMeSince
+			s.AwaitingOthersSince = act.AwaitingOthersSince
 			mu.Lock()
 			changed = append(changed, items[i])
 			mu.Unlock()
@@ -395,10 +399,16 @@ func runConverse(ctx context.Context, p RunParams) error {
 	// (docs/adr/0018, 0019, 0020).
 	var (
 		sourceContext string
+		viewerLogin   string
 		tools         worklist.ToolBox
 	)
 	if cred, err := zz.VendCredential(ctx, p.Provider); err == nil {
 		gh := github.NewClient(p.Client, p.GitHubBaseURL)
+		// Resolve who the assistant is talking to so it recognizes the user when
+		// they appear on the item and never refers them to their own account.
+		if login, err := gh.Login(ctx, cred.AccessToken); err == nil {
+			viewerLogin = login
+		}
 		isPR := item.Type == worklist.TypePullRequest
 		if disc, err := gh.Discussion(ctx, cred.AccessToken, item.GitHub.Repo, item.GitHub.Number, isPR); err == nil {
 			sourceContext = formatDiscussion(disc)
@@ -406,7 +416,7 @@ func runConverse(ctx context.Context, p RunParams) error {
 		tools = newGitHubToolBox(gh, cred.AccessToken, item.GitHub.Repo)
 	}
 
-	reply, err := conv.Reply(ctx, item, sourceContext, history, userText, tools)
+	reply, err := conv.Reply(ctx, item, viewerLogin, sourceContext, history, userText, tools)
 	if err != nil {
 		return fmt.Errorf("assistant reply: %w", err)
 	}

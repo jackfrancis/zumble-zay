@@ -69,8 +69,15 @@ type ToolBox interface {
 // It may be empty (no credential, a fetch failure, or an in-process turn), in
 // which case the assistant reasons only over the item's existing ZZ metadata.
 //
+// viewerLogin is the GitHub username of the user the assistant is talking to, so
+// it can recognize that user when they appear on the item (as author, approver,
+// reviewer, assignee, or commenter) and address them directly instead of
+// treating them as a third party. It may be empty when the login is unknown
+// (e.g. no credential to resolve it), in which case the assistant is given no
+// identity hint and behaves as before.
+//
 // tools may be nil; when present, the assistant can call them to verify claims
 // against live GitHub data before answering (docs/adr/0020). They are read-only.
 type Conversationalist interface {
-	Reply(ctx context.Context, item WorkItem, sourceContext string, history []Message, userText string, tools ToolBox) (string, error)
+	Reply(ctx context.Context, item WorkItem, viewerLogin string, sourceContext string, history []Message, userText string, tools ToolBox) (string, error)
 }

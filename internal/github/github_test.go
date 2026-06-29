@@ -159,6 +159,9 @@ func TestItemActivity(t *testing.T) {
 	if act.AwaitingMeSince.IsZero() {
 		t.Errorf("awaiting should be set (requested, not reviewed)")
 	}
+	if act.OtherReviewers != 0 {
+		t.Errorf("other_reviewers = %d, want 0 (no one has reviewed)", act.OtherReviewers)
+	}
 }
 
 func TestItemActivityReviewedClearsAwaiting(t *testing.T) {
@@ -180,7 +183,43 @@ func TestItemActivityReviewedClearsAwaiting(t *testing.T) {
 	if !act.AwaitingMeSince.IsZero() {
 		t.Errorf("awaiting should be cleared after review, got %v", act.AwaitingMeSince)
 	}
+	if act.AwaitingOthersSince.IsZero() {
+		t.Errorf("awaiting-others should be set: the user reviewed, so the ball is on the author")
+	}
 	if act.Participants != 1 {
 		t.Errorf("participants = %d, want 1 (the reviewer)", act.Participants)
+	}
+	if act.OtherReviewers != 0 {
+		t.Errorf("other_reviewers = %d, want 0 (only the user reviewed)", act.OtherReviewers)
+	}
+}
+
+// TestItemActivityOthersReviewedAwaitsAuthor covers the passive-assignee case:
+// the user is on the radar (e.g. bot-assigned) but never reviewed, yet another
+// reviewer has requested changes — forward progress is on the author, not the
+// user, so the ball is in others' court and someone else is already engaged.
+func TestItemActivityOthersReviewedAwaitsAuthor(t *testing.T) {
+	const me = "octocat"
+	body := `[
+	  {"event":"reviewed","submitted_at":"2026-06-21T10:00:00Z","state":"changes_requested","user":{"login":"reviewer-bot"}}
+	]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL)
+	act, err := c.ItemActivity(context.Background(), "tok", "octo/repo", 1, me)
+	if err != nil {
+		t.Fatalf("ItemActivity: %v", err)
+	}
+	if !act.AwaitingMeSince.IsZero() {
+		t.Errorf("awaiting-me should be zero: no review was requested of the user, got %v", act.AwaitingMeSince)
+	}
+	if act.AwaitingOthersSince.IsZero() {
+		t.Errorf("awaiting-others should be set: another reviewer requested changes, ball on author")
+	}
+	if act.OtherReviewers != 1 {
+		t.Errorf("other_reviewers = %d, want 1", act.OtherReviewers)
 	}
 }

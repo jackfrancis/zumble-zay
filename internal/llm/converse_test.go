@@ -56,7 +56,7 @@ func TestConverserRunsToolLoop(t *testing.T) {
 	c := NewConverser(Config{Endpoint: srv.URL, Model: "m", Token: "tok", Client: srv.Client(), Logger: discardLogger()})
 	reply, err := c.Reply(context.Background(),
 		worklist.WorkItem{Type: worklist.TypePullRequest, GitHub: worklist.GitHubRef{Repo: "k/a", Number: 1, Title: "bump otel"}},
-		"", nil, "is this already on master?", box)
+		"", "", nil, "is this already on master?", box)
 	if err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestConverserAggregatesMultiChoiceToolCalls(t *testing.T) {
 	c := NewConverser(Config{Endpoint: srv.URL, Model: "m", Token: "tok", Client: srv.Client(), Logger: discardLogger()})
 	reply, err := c.Reply(context.Background(),
 		worklist.WorkItem{Type: worklist.TypePullRequest, GitHub: worklist.GitHubRef{Repo: "kubernetes/autoscaler", Number: 9518}},
-		"", nil, "is this already merged?", box)
+		"", "", nil, "is this already merged?", box)
 	if err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestConverserParsesLegacyFunctionCall(t *testing.T) {
 
 	box := &fakeToolBox{}
 	c := NewConverser(Config{Endpoint: srv.URL, Model: "m", Token: "tok", Client: srv.Client(), Logger: discardLogger()})
-	reply, err := c.Reply(context.Background(), worklist.WorkItem{GitHub: worklist.GitHubRef{Repo: "k/a", Number: 1}}, "", nil, "is it bumped?", box)
+	reply, err := c.Reply(context.Background(), worklist.WorkItem{GitHub: worklist.GitHubRef{Repo: "k/a", Number: 1}}, "", "", nil, "is it bumped?", box)
 	if err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestConverserNoToolsSingleCall(t *testing.T) {
 	defer srv.Close()
 
 	c := NewConverser(Config{Endpoint: srv.URL, Model: "m", Token: "tok", Client: srv.Client(), Logger: discardLogger()})
-	reply, err := c.Reply(context.Background(), worklist.WorkItem{GitHub: worklist.GitHubRef{Repo: "k/a", Number: 1}}, "", nil, "draft a review request", nil)
+	reply, err := c.Reply(context.Background(), worklist.WorkItem{GitHub: worklist.GitHubRef{Repo: "k/a", Number: 1}}, "", "", nil, "draft a review request", nil)
 	if err != nil {
 		t.Fatalf("Reply: %v", err)
 	}
@@ -177,5 +177,59 @@ func TestConverserNoToolsSingleCall(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("expected a single model call with no tools, got %d", calls)
+	}
+}
+
+// TestReplyInjectsViewerIdentity proves the assistant is told who it is talking
+// to, so it never refers the user to their own GitHub account — the "confirm
+// with jackfrancis" bug observed when the user IS jackfrancis (docs/adr/0019).
+func TestReplyInjectsViewerIdentity(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	c := NewConverser(Config{Endpoint: srv.URL, Model: "m", Token: "tok", Client: srv.Client(), Logger: discardLogger()})
+	_, err := c.Reply(context.Background(),
+		worklist.WorkItem{Type: worklist.TypePullRequest, GitHub: worklist.GitHubRef{Repo: "kubernetes/autoscaler", Number: 9411}},
+		"jackfrancis", "", nil, "should I close this?", nil)
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if !strings.Contains(body, "jackfrancis") {
+		t.Fatalf("system prompt should name the viewer, got:\n%s", body)
+	}
+	// The guidance must frame the login as the user themselves, not a third party.
+	for _, want := range []string{"THEMSELVES", "Never tell them"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("system prompt missing viewer-identity guidance %q, got:\n%s", want, body)
+		}
+	}
+}
+
+// TestReplyOmitsViewerIdentityWhenUnknown confirms an empty login leaves the
+// prompt unchanged, so the in-process path (no credential) is unaffected.
+func TestReplyOmitsViewerIdentityWhenUnknown(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	c := NewConverser(Config{Endpoint: srv.URL, Model: "m", Token: "tok", Client: srv.Client(), Logger: discardLogger()})
+	if _, err := c.Reply(context.Background(),
+		worklist.WorkItem{GitHub: worklist.GitHubRef{Repo: "k/a", Number: 1}},
+		"", "", nil, "what is this?", nil); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if strings.Contains(body, "THEMSELVES") {
+		t.Fatalf("prompt should omit viewer-identity guidance when login is unknown, got:\n%s", body)
 	}
 }

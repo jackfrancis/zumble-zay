@@ -151,6 +151,12 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 		kubectl -n $(KUBE_NS) create secret generic zumble-zay-secrets \
 			--from-literal=SESSION_SECRET="$$(openssl rand -base64 48)" \
 			--from-literal=CONTROL_PLANE_TOKEN="$$(openssl rand -base64 48)"
+	# Ensure the control-plane token exists even on a secret created before it was
+	# introduced: the create above is skipped when the secret already exists, so a
+	# pre-existing secret would otherwise lack the key and crash-loop the orchestrator.
+	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets -o jsonpath='{.data.CONTROL_PLANE_TOKEN}' 2>/dev/null | grep -q . || \
+		kubectl -n $(KUBE_NS) patch secret zumble-zay-secrets --type merge \
+			-p "{\"stringData\":{\"CONTROL_PLANE_TOKEN\":\"$$(openssl rand -base64 48 | tr -d '\n')\"}}"
 	kubectl apply -k deploy/k8s/overlays/dev
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is
