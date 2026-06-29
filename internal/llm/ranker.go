@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,6 +41,7 @@ type Config struct {
 	Model    string       // model identifier; empty uses DefaultModel
 	Token    string       // bearer token (e.g. a Copilot copilot_chat PAT)
 	Client   *http.Client // shared HTTP client; nil gets a default
+	Logger   *slog.Logger // diagnostics (converse tool loop); nil uses slog.Default()
 }
 
 // Ranker implements worklist.AxisRanker by asking a chat model to score one
@@ -72,6 +74,39 @@ func NewRanker(cfg Config) *Ranker {
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// ToolCalls is set on an assistant message that requests tool invocations;
+	// ToolCallID links a role=="tool" result back to the call it answers
+	// (docs/adr/0020).
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	// FinishReason is response-only diagnostic context ("stop", "tool_calls",
+	// ...); it is never serialized into a request.
+	FinishReason string `json:"-"`
+	// raw is the unparsed response body, retained for diagnostics when a tool-call
+	// turn does not parse as expected (unexported -> never serialized).
+	raw []byte
+}
+
+// chatToolCall is one tool invocation the model requested.
+type chatToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"` // "function"
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"` // JSON-encoded arguments
+	} `json:"function"`
+}
+
+// chatTool advertises a callable function to the model.
+type chatTool struct {
+	Type     string           `json:"type"` // "function"
+	Function chatToolFunction `json:"function"`
+}
+
+type chatToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 type chatRequest struct {
@@ -79,6 +114,8 @@ type chatRequest struct {
 	Messages       []chatMessage   `json:"messages"`
 	Temperature    float64         `json:"temperature"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	Tools          []chatTool      `json:"tools,omitempty"`
+	ToolChoice     string          `json:"tool_choice,omitempty"`
 }
 
 type responseFormat struct {
@@ -88,8 +125,16 @@ type responseFormat struct {
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string         `json:"content"`
+			ToolCalls []chatToolCall `json:"tool_calls"`
+			// FunctionCall is the legacy single-function shape some OpenAI-compatible
+			// gateways still return instead of tool_calls; parsed as a fallback.
+			FunctionCall *struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function_call"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 }
 
@@ -107,7 +152,7 @@ type axesDoc struct {
 // AxisProposal. The values are clamped to [0,1] defensively; ZZ ratifies them
 // against the baseline regardless.
 func (r *Ranker) Propose(ctx context.Context, item worklist.WorkItem) (worklist.AxisProposal, error) {
-	reqBody, err := json.Marshal(chatRequest{
+	content, err := chatComplete(ctx, r.client, r.endpoint, r.token, chatRequest{
 		Model: r.model,
 		Messages: []chatMessage{
 			{Role: "system", Content: systemPrompt},
@@ -117,43 +162,11 @@ func (r *Ranker) Propose(ctx context.Context, item worklist.WorkItem) (worklist.
 		ResponseFormat: &responseFormat{Type: "json_object"},
 	})
 	if err != nil {
-		return worklist.AxisProposal{}, fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.endpoint, bytes.NewReader(reqBody))
-	if err != nil {
 		return worklist.AxisProposal{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	if isCopilotHost(r.endpoint) {
-		req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
-	}
-
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return worklist.AxisProposal{}, fmt.Errorf("chat request: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-	if err != nil {
-		return worklist.AxisProposal{}, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return worklist.AxisProposal{}, fmt.Errorf("chat status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var cr chatResponse
-	if err := json.Unmarshal(body, &cr); err != nil {
-		return worklist.AxisProposal{}, fmt.Errorf("decode response: %w", err)
-	}
-	if len(cr.Choices) == 0 || strings.TrimSpace(cr.Choices[0].Message.Content) == "" {
-		return worklist.AxisProposal{}, fmt.Errorf("chat returned no content")
 	}
 
 	var doc axesDoc
-	if err := json.Unmarshal([]byte(stripFences(cr.Choices[0].Message.Content)), &doc); err != nil {
+	if err := json.Unmarshal([]byte(stripFences(content)), &doc); err != nil {
 		return worklist.AxisProposal{}, fmt.Errorf("parse axes JSON: %w", err)
 	}
 	return worklist.AxisProposal{
@@ -163,6 +176,94 @@ func (r *Ranker) Propose(ctx context.Context, item worklist.WorkItem) (worklist.
 		Urgency:    clamp01(doc.Urgency),
 		Confidence: clamp01(doc.Confidence),
 		Rationale:  strings.TrimSpace(doc.Rationale),
+	}, nil
+}
+
+// chatComplete posts an OpenAI-compatible chat-completions request and returns
+// the assistant message content. Shared by the ranker and the converser; it
+// requires non-empty content, so it is for the no-tools case.
+func chatComplete(ctx context.Context, httpClient *http.Client, endpoint, token string, body chatRequest) (string, error) {
+	msg, err := chat(ctx, httpClient, endpoint, token, body)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(msg.Content) == "" {
+		return "", fmt.Errorf("chat returned no content")
+	}
+	return msg.Content, nil
+}
+
+// chat posts a chat-completions request and returns the assistant's message,
+// including any tool calls. Unlike chatComplete it does not require content,
+// since a tool-calling turn returns tool_calls with empty content (docs/adr/0020).
+// It sends the Copilot integration header when the endpoint is a Copilot host.
+func chat(ctx context.Context, httpClient *http.Client, endpoint, token string, body chatRequest) (chatMessage, error) {
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return chatMessage{}, fmt.Errorf("marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return chatMessage{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	if isCopilotHost(endpoint) {
+		req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return chatMessage{}, fmt.Errorf("chat request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return chatMessage{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return chatMessage{}, fmt.Errorf("chat status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var cr chatResponse
+	if err := json.Unmarshal(raw, &cr); err != nil {
+		return chatMessage{}, fmt.Errorf("decode response: %w", err)
+	}
+	if len(cr.Choices) == 0 {
+		return chatMessage{}, fmt.Errorf("chat returned no choices")
+	}
+	// Aggregate across choices. The OpenAI standard returns a single choice, but
+	// some gateways (Copilot serving Claude) split one assistant turn into
+	// several choices — a text block in one, each tool call in its own — so the
+	// tool calls live beyond choices[0]. Collect content and tool calls from all
+	// choices so a multi-choice tool turn parses the same as a single-choice one.
+	var (
+		content   strings.Builder
+		toolCalls []chatToolCall
+	)
+	for i := range cr.Choices {
+		cm := cr.Choices[i].Message
+		if s := strings.TrimSpace(cm.Content); s != "" {
+			if content.Len() > 0 {
+				content.WriteString("\n")
+			}
+			content.WriteString(cm.Content)
+		}
+		toolCalls = append(toolCalls, cm.ToolCalls...)
+		// Fallback for the legacy single-function shape (function_call) some
+		// gateways return instead of tool_calls.
+		if cm.FunctionCall != nil && cm.FunctionCall.Name != "" {
+			tc := chatToolCall{ID: fmt.Sprintf("call_%d", i), Type: "function"}
+			tc.Function.Name = cm.FunctionCall.Name
+			tc.Function.Arguments = cm.FunctionCall.Arguments
+			toolCalls = append(toolCalls, tc)
+		}
+	}
+	return chatMessage{
+		Role:         "assistant",
+		Content:      content.String(),
+		ToolCalls:    toolCalls,
+		FinishReason: cr.Choices[0].FinishReason,
+		raw:          raw,
 	}, nil
 }
 

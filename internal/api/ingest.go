@@ -61,9 +61,17 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prevHidden := make(map[string]time.Time, len(existing))
+	prevThread := make(map[string][]worklist.Message, len(existing))
+	prevResearch := make(map[string]*worklist.ResearchAdjustment, len(existing))
 	for _, it := range existing {
 		if !it.Meta.HiddenAt.IsZero() {
 			prevHidden[it.ID] = it.Meta.HiddenAt
+		}
+		if len(it.Thread) > 0 {
+			prevThread[it.ID] = it.Thread
+		}
+		if it.Signals.Research != nil {
+			prevResearch[it.ID] = it.Signals.Research
 		}
 	}
 
@@ -73,10 +81,18 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		req.Items[i].OwnerID = p.ActingUserID
 		// Provenance: agent writes are always agent-derived; humans override.
 		req.Items[i].Meta.Origin = worklist.OriginAgent
+		// Preserve the discussion-derived research re-weighting across re-ingest
+		// (docs/adr/0022), BEFORE scoring so it re-applies to the refreshed
+		// foundation. A github-ingest sends no research; enrich/rank round-trip the
+		// stored value, so this is a no-op for them.
+		req.Items[i].Signals.Research = prevResearch[req.Items[i].ID]
 		// Decorate ZZ metadata by scoring the item's signals (docs/adr/0008).
 		req.Items[i].Meta = worklist.Score(req.Items[i], now)
 		// Carry (or auto-clear) the user's hidden state (docs/adr/0017).
 		req.Items[i].Meta.HiddenAt = worklist.HiddenAfter(prevHidden[req.Items[i].ID], req.Items[i].GitHub.UpdatedAt)
+		// Preserve the assistive conversation across re-ingest (docs/adr/0018);
+		// agents never author it, so the stored thread is authoritative.
+		req.Items[i].Thread = prevThread[req.Items[i].ID]
 		if req.Items[i].CreatedAt.IsZero() {
 			req.Items[i].CreatedAt = now
 		}
@@ -105,6 +121,19 @@ func (h *IngestHandler) List(w http.ResponseWriter, r *http.Request) {
 	items, err := h.store.List(r.Context(), p.ActingUserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load work items")
+		return
+	}
+	// Optional single-item fetch: a per-item runtime (github-converse) reads just
+	// the item it was dispatched for, rather than the whole worklist (docs/adr/0019).
+	if id := r.URL.Query().Get("id"); id != "" {
+		out := []worklist.WorkItem{}
+		for _, it := range items {
+			if it.ID == id {
+				out = append(out, it)
+				break
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": out})
 		return
 	}
 	// Optional shortlist: when limit > 0, return the top-N by rank so an

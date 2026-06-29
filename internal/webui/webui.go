@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackfrancis/zumble-zay/internal/markdown"
 	"github.com/jackfrancis/zumble-zay/internal/session"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
@@ -45,25 +46,29 @@ type Pipeline interface {
 
 // Handler renders the landing page and serves its static assets.
 type Handler struct {
-	tmpl      *template.Template
-	sessions  Sessions
-	store     worklist.Store
-	pipeline  Pipeline
-	providers Providers
-	now       func() time.Time
+	tmpl        *template.Template
+	sessions    Sessions
+	store       worklist.Store
+	pipeline    Pipeline
+	providers   Providers
+	convEnabled bool
+	now         func() time.Time
 }
 
 // New builds the UI handler. The embedded templates are parsed once; a parse
 // failure is a build error in static assets, so it panics (fails fast).
-func New(sessions Sessions, store worklist.Store, pipeline Pipeline, providers Providers) *Handler {
+// convEnabled gates the assistive conversation UI, mirroring the API: with no
+// chat model configured the Discuss affordances are hidden (docs/adr/0019).
+func New(sessions Sessions, store worklist.Store, pipeline Pipeline, providers Providers, convEnabled bool) *Handler {
 	tmpl := template.Must(template.New("webui").Funcs(funcs).ParseFS(templatesFS, "templates/*.html"))
 	return &Handler{
-		tmpl:      tmpl,
-		sessions:  sessions,
-		store:     store,
-		pipeline:  pipeline,
-		providers: providers,
-		now:       time.Now,
+		tmpl:        tmpl,
+		sessions:    sessions,
+		store:       store,
+		pipeline:    pipeline,
+		providers:   providers,
+		convEnabled: convEnabled,
+		now:         time.Now,
 	}
 }
 
@@ -73,11 +78,13 @@ func (h *Handler) Static() http.Handler {
 }
 
 type pageData struct {
-	View        string // signin | processing | error | worklist
+	View        string // signin | processing | error | worklist | thread
 	User        *session.User
 	Providers   []string
 	Items       []worklist.WorkItem
-	RefreshSecs int // when > 0, the page auto-refreshes after this many seconds
+	Item        worklist.WorkItem // the single item, for the thread view
+	ConvEnabled bool              // whether the assistive conversation is available
+	RefreshSecs int               // when > 0, the page auto-refreshes after this many seconds
 }
 
 // Index handles GET /. It renders the sign-in view for anonymous visitors, the
@@ -114,7 +121,7 @@ func (h *Handler) view(r *http.Request) (pageData, int) {
 		return pageData{View: "processing", User: user, RefreshSecs: 3}, http.StatusOK
 	}
 	// Settled: the final ranked list, rendered once and left static.
-	return pageData{View: "worklist", User: user, Items: items}, http.StatusOK
+	return pageData{View: "worklist", User: user, Items: items, ConvEnabled: h.convEnabled}, http.StatusOK
 }
 
 // Hide handles POST /items/hide. It marks the given item hidden for the signed-in
@@ -148,6 +155,30 @@ func (h *Handler) Hide(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// Thread handles GET /items/thread?id=<item id>. It renders the per-item
+// assistive conversation page for the signed-in owner; the page's fetch posts
+// turns to POST /api/thread (docs/adr/0018).
+func (h *Handler) Thread(w http.ResponseWriter, r *http.Request) {
+	user := h.sessions.CurrentUser(r)
+	if user == nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	items, err := h.store.List(r.Context(), user.ID)
+	if err != nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	for _, it := range items {
+		if it.ID == id {
+			h.render(w, http.StatusOK, pageData{View: "thread", User: user, Item: it, ConvEnabled: h.convEnabled})
+			return
+		}
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func (h *Handler) render(w http.ResponseWriter, status int, data pageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
@@ -160,6 +191,7 @@ var funcs = template.FuncMap{
 	"typeLabel":     typeLabel,
 	"pctBucket":     pctBucket,
 	"axis2":         axis2,
+	"markdown":      markdown.ToSafeHTML,
 }
 
 // pctBucket rounds an axis value (0..1) to the nearest 10% so the rank bar can

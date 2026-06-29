@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,7 +32,42 @@ type fakeProviders struct{}
 func (fakeProviders) Providers() []string { return []string{"github"} }
 
 func handlerFor(user *session.User, store worklist.Store, pipe *fakePipeline) *Handler {
-	return New(fakeSessions{user}, store, pipe, fakeProviders{})
+	return New(fakeSessions{user}, store, pipe, fakeProviders{}, true)
+}
+
+func TestWorklistFlagsItemsWithDiscussion(t *testing.T) {
+	user := &session.User{ID: "u1"}
+	store := worklist.NewMemoryStore()
+	now := time.Now()
+	store.Seed("u1",
+		worklist.WorkItem{
+			ID: "a", OwnerID: "u1", Meta: worklist.Metadata{Origin: worklist.OriginAgent},
+			GitHub: worklist.GitHubRef{Number: 1, UpdatedAt: now},
+			Thread: []worklist.Message{{Role: worklist.RoleUser, Content: "hi"}, {Role: worklist.RoleAgent, Content: "hello"}},
+		},
+		worklist.WorkItem{
+			ID: "b", OwnerID: "u1", Meta: worklist.Metadata{Origin: worklist.OriginAgent},
+			GitHub: worklist.GitHubRef{Number: 2, UpdatedAt: now},
+		},
+	)
+	h := handlerFor(user, store, &fakePipeline{active: false})
+
+	rec := httptest.NewRecorder()
+	h.Index(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// Exactly the threaded item gets the emphasized cue; the other stays plain.
+	if n := strings.Count(body, "zz-discuss--active"); n != 1 {
+		t.Errorf("expected exactly one flagged Discuss button, got %d", n)
+	}
+	if !strings.Contains(body, "&#10024; Discuss") {
+		t.Errorf("expected the sparkle cue on the discussed item")
+	}
+	if n := strings.Count(body, ">Discuss<"); n != 1 {
+		t.Errorf("expected exactly one plain Discuss button, got %d", n)
+	}
 }
 
 func TestViewSelection(t *testing.T) {

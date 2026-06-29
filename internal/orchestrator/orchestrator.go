@@ -40,6 +40,20 @@ const JobGitHubEnrich JobType = "github-enrich"
 // policy grants no provider.
 const JobLLMRank JobType = "llm-rank"
 
+// JobGitHubConverse answers one turn of a user's assistive conversation about a
+// single item (docs/adr/0019). Unlike the pipeline stages it is per-item — its
+// spec carries an ItemID — and it both reads GitHub (the live PR description,
+// discussion, and changed files, for context) and writes ZZ (the agent's reply,
+// appended to the item's thread). It does not chain to any further stage.
+const JobGitHubConverse JobType = "github-converse"
+
+// JobGitHubResearch re-weights a single item's ranking axes from its
+// conversation thread (docs/adr/0022). It is per-item (its spec carries an
+// ItemID) and reads and writes ZZ only — the cached foundation plus the thread
+// in, the research multipliers out — so it needs no provider credential. It does
+// not chain to any further stage.
+const JobGitHubResearch JobType = "github-research"
+
 // JobState is a point in a job's lifecycle.
 type JobState string
 
@@ -57,6 +71,9 @@ type JobSpec struct {
 	Type         JobType
 	Provider     string
 	ActingUserID string
+	// ItemID scopes a per-item job (e.g. github-converse) to one work item; it is
+	// empty for the whole-worklist pipeline stages.
+	ItemID string
 }
 
 // Handle identifies a launched workload and where it ran, so the orchestrator
@@ -91,6 +108,7 @@ type Job struct {
 	Type         JobType
 	Provider     string
 	ActingUserID string
+	ItemID       string // set for per-item jobs (github-converse); empty otherwise
 	State        JobState
 	Handle       Handle // where the workload ran (substrate observability)
 	Err          string
@@ -120,6 +138,14 @@ var policies = map[JobType]policyEntry{
 		provider: "",
 		scopes:   []principal.Scope{principal.ScopeSignalsRead, principal.ScopeMetadataWrite},
 	},
+	JobGitHubConverse: {
+		provider: "github",
+		scopes:   []principal.Scope{principal.ScopeSignalsRead, principal.ScopeMetadataWrite},
+	},
+	JobGitHubResearch: {
+		provider: "",
+		scopes:   []principal.Scope{principal.ScopeSignalsRead, principal.ScopeMetadataWrite},
+	},
 }
 
 const (
@@ -132,7 +158,9 @@ const (
 	// defaultRankJobTTL is the llm-rank budget. That stage makes one slow
 	// chat-model call per shortlisted item (seconds each, more with adaptive
 	// thinking), so it needs more headroom than the bounded GitHub fan-outs; a
-	// full pass otherwise approaches the general deadline.
+	// full pass otherwise approaches the general deadline. The per-item converse
+	// job shares this budget: it makes a live GitHub fetch plus one slow
+	// chat-model call (docs/adr/0019).
 	defaultRankJobTTL = 5 * time.Minute
 	queueDepth        = 128
 )
@@ -183,15 +211,46 @@ func (o *Orchestrator) EnsureBackfill(_ context.Context, ownerID string) error {
 	if ownerID == "" {
 		return fmt.Errorf("orchestrator: empty ownerID")
 	}
-	return o.enqueue(JobGitHubIngest, ownerID)
+	return o.enqueue(JobGitHubIngest, ownerID, "")
 }
 
-func (o *Orchestrator) enqueue(t JobType, ownerID string) error {
+// Converse enqueues a github-converse job that answers one turn of the assistive
+// conversation about a single item (docs/adr/0019). It returns immediately so it
+// is safe to call from the request path; the spawned runtime fetches live GitHub
+// context, asks the model, and writes the reply back to the item's thread. A
+// converse already in flight for the same user+item is deduped.
+func (o *Orchestrator) Converse(_ context.Context, ownerID, itemID string) error {
+	if ownerID == "" || itemID == "" {
+		return fmt.Errorf("orchestrator: converse requires ownerID and itemID")
+	}
+	return o.enqueue(JobGitHubConverse, ownerID, itemID)
+}
+
+// Research enqueues a github-research job that re-weights one item's ranking
+// axes from its conversation thread (docs/adr/0022). It returns immediately so it
+// is safe to call from a reconcile loop; the spawned runtime reads the item and
+// its thread, asks the model for the per-axis multipliers, and writes them back.
+// A research already in flight for the same user+item is deduped.
+func (o *Orchestrator) Research(_ context.Context, ownerID, itemID string) error {
+	if ownerID == "" || itemID == "" {
+		return fmt.Errorf("orchestrator: research requires ownerID and itemID")
+	}
+	return o.enqueue(JobGitHubResearch, ownerID, itemID)
+}
+
+// enqueue records a job and queues it for a worker. itemID is empty for the
+// whole-worklist pipeline stages and set for per-item jobs (github-converse); it
+// is part of the dedupe key so distinct items can converse concurrently while a
+// repeated turn for the same item is a no-op.
+func (o *Orchestrator) enqueue(t JobType, ownerID, itemID string) error {
 	pol, ok := policies[t]
 	if !ok {
 		return fmt.Errorf("orchestrator: unknown job type %q", t)
 	}
 	key := ownerID + "/" + string(t)
+	if itemID != "" {
+		key += "/" + itemID
+	}
 
 	o.mu.Lock()
 	if o.closed {
@@ -200,12 +259,12 @@ func (o *Orchestrator) enqueue(t JobType, ownerID string) error {
 	}
 	if o.inflight[key] {
 		o.mu.Unlock()
-		return nil // idempotent: a job for this user+type is already pending/running
+		return nil // idempotent: a job for this dedupe key is already pending/running
 	}
 	id := newID()
 	now := time.Now().UTC()
 	o.jobs[id] = &Job{
-		ID: id, Type: t, Provider: pol.provider, ActingUserID: ownerID,
+		ID: id, Type: t, Provider: pol.provider, ActingUserID: ownerID, ItemID: itemID,
 		State: StatePending, CreatedAt: now, UpdatedAt: now,
 	}
 	o.inflight[key] = true
@@ -242,8 +301,11 @@ func (o *Orchestrator) run(id string) {
 	job.State = StateRunning
 	job.UpdatedAt = time.Now().UTC()
 	pol := policies[job.Type]
-	spec := JobSpec{JobID: job.ID, Type: job.Type, Provider: job.Provider, ActingUserID: job.ActingUserID}
+	spec := JobSpec{JobID: job.ID, Type: job.Type, Provider: job.Provider, ActingUserID: job.ActingUserID, ItemID: job.ItemID}
 	key := job.ActingUserID + "/" + string(job.Type)
+	if job.ItemID != "" {
+		key += "/" + job.ItemID
+	}
 	o.mu.Unlock()
 
 	// Authorization minted at spawn: runtime-type policy ∩ user consent. The
@@ -285,7 +347,7 @@ func (o *Orchestrator) run(id string) {
 	// budget, and failure domain); the final stage does not chain further.
 	if err == nil {
 		if next, ok := nextStage(jobType); ok {
-			if e := o.enqueue(next, user); e != nil && o.log != nil {
+			if e := o.enqueue(next, user, ""); e != nil && o.log != nil {
 				o.log.Warn("could not enqueue next pipeline stage", "stage", next, "user", user, "err", e)
 			}
 		}
@@ -308,11 +370,11 @@ func (o *Orchestrator) safeLaunch(spec JobSpec, token string) (handle Handle, er
 	return o.launcher.Launch(ctx, spec, token)
 }
 
-// deadlineFor returns the execution budget for a job type. The llm-rank stage
-// calls a slow chat model once per shortlisted item, so it gets more headroom
+// deadlineFor returns the execution budget for a job type. The llm-rank and
+// per-item converse stages call a slow chat model, so they get more headroom
 // than the bounded GitHub API fan-outs. A larger configured jobTTL still wins.
 func (o *Orchestrator) deadlineFor(t JobType) time.Duration {
-	if t == JobLLMRank && o.jobTTL < defaultRankJobTTL {
+	if (t == JobLLMRank || t == JobGitHubConverse || t == JobGitHubResearch) && o.jobTTL < defaultRankJobTTL {
 		return defaultRankJobTTL
 	}
 	return o.jobTTL
@@ -353,14 +415,19 @@ func (o *Orchestrator) Jobs() []Job {
 	return out
 }
 
-// Active reports whether any job for ownerID is still pending or running, i.e.
-// an ingest/enrich/llm-rank pass is in flight for that user. The UI uses it to
-// keep auto-refreshing the worklist until ranking settles (docs/adr/0016).
+// Active reports whether any pipeline job for ownerID is still pending or
+// running, i.e. an ingest/enrich/llm-rank pass is in flight for that user. The
+// UI uses it to keep auto-refreshing the worklist until ranking settles
+// (docs/adr/0016). Per-item converse jobs are excluded: they are interactive and
+// must not make the radar look like it is still ingesting (docs/adr/0019).
 func (o *Orchestrator) Active(ownerID string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, j := range o.jobs {
-		if j.ActingUserID == ownerID && (j.State == StatePending || j.State == StateRunning) {
+		if j.ActingUserID != ownerID || j.Type == JobGitHubConverse || j.Type == JobGitHubResearch {
+			continue
+		}
+		if j.State == StatePending || j.State == StateRunning {
 			return true
 		}
 	}

@@ -16,6 +16,7 @@ const (
 	EnvProvider      = "ZZ_PROVIDER"
 	EnvGitHubBaseURL = "ZZ_GITHUB_BASE_URL"
 	EnvEnrichLimit   = "ZZ_ENRICH_LIMIT"
+	EnvItemID        = "ZZ_ITEM_ID"
 	EnvAIEndpoint    = "ZZ_AI_ENDPOINT"
 	EnvAIModel       = "ZZ_AI_MODEL"
 	// EnvAIToken carries the ranking model's bearer token. Unlike the other
@@ -45,6 +46,9 @@ func Env(p RunParams) map[string]string {
 	if p.EnrichLimit > 0 {
 		env[EnvEnrichLimit] = strconv.Itoa(p.EnrichLimit)
 	}
+	if p.ItemID != "" {
+		env[EnvItemID] = p.ItemID
+	}
 	if p.AIEndpoint != "" {
 		env[EnvAIEndpoint] = p.AIEndpoint
 	}
@@ -64,6 +68,7 @@ func ParamsFromEnv(getenv func(string) string) (RunParams, error) {
 		Token:         getenv(EnvToken),
 		Provider:      getenv(EnvProvider),
 		GitHubBaseURL: getenv(EnvGitHubBaseURL),
+		ItemID:        getenv(EnvItemID),
 		AIEndpoint:    getenv(EnvAIEndpoint),
 		AIModel:       getenv(EnvAIModel),
 		AIToken:       getenv(EnvAIToken),

@@ -54,6 +54,23 @@ func Score(item WorkItem, now time.Time) Metadata {
 		add(&contribs, "rank", "llm", p.Confidence, detail)
 	}
 
+	// The research layer re-weights the foundation axes from the conversation's
+	// evidence (docs/adr/0022): each axis is scaled by its multiplier (bounded to
+	// [0,2]), and the product is bounded to [0,1]. Absent research (no thread / no
+	// run) the axes are unchanged. The metadata remains the anchor: a multiplier
+	// cannot manufacture an axis a near-zero foundation does not support.
+	if rsh := item.Signals.Research; rsh != nil {
+		rel = clampUnit(rel * clampMult(rsh.Relevance))
+		imp = clampUnit(imp * clampMult(rsh.Impact))
+		eng = clampUnit(eng * clampMult(rsh.Engagement))
+		urg = clampUnit(urg * clampMult(rsh.Urgency))
+		detail := rsh.Rationale
+		if detail == "" {
+			detail = "research re-weighting"
+		}
+		add(&contribs, "rank", "research", 0, detail)
+	}
+
 	rank := wRelevance*rel + wUrgency*urg + wImpact*imp + wEngagement*eng
 
 	m := Metadata{
@@ -68,10 +85,16 @@ func Score(item WorkItem, now time.Time) Metadata {
 		ScoredAt:      now,
 	}
 	// The LLM rationale is the headline explanation when a proposal scored the
-	// item; otherwise it is derived from the signal contributions.
-	if p := item.Signals.Proposed; p != nil && p.Rationale != "" {
-		m.Rationale = p.Rationale
-	} else {
+	// item; the research rationale (when present) supersedes it as the most
+	// informative "what changed" story; otherwise it is derived from the signal
+	// contributions. Foundation and research rationales remain separately stored
+	// on Signals for full provenance (docs/adr/0022).
+	switch {
+	case item.Signals.Research != nil && item.Signals.Research.Rationale != "":
+		m.Rationale = item.Signals.Research.Rationale
+	case item.Signals.Proposed != nil && item.Signals.Proposed.Rationale != "":
+		m.Rationale = item.Signals.Proposed.Rationale
+	default:
 		m.Rationale = rationale(contribs)
 	}
 	return m
@@ -94,6 +117,11 @@ func baselineAxes(s Signals, now time.Time) (rel, imp, eng, urg float64) {
 // bounds a value to [0,1], the valid range for an axis.
 func clampUnit(f float64) float64 {
 	return math.Max(0, math.Min(1, f))
+}
+
+// clampMult bounds a research multiplier to [0,2]; 1.0 is neutral (docs/adr/0022).
+func clampMult(f float64) float64 {
+	return math.Max(0, math.Min(2, f))
 }
 
 // relevanceScore: the strongest relationship reason wins, with a small bump for

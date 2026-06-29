@@ -37,7 +37,14 @@ a:hover { text-decoration: underline; }
   margin-bottom: 12px;
 }
 .zz-item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.zz-item-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .zz-hide { margin: 0; flex: none; }
+/* Discuss button: emphasized when the item already has a saved AI discussion. */
+.zz-discuss--active {
+  border-color: var(--borderColor-accent-emphasis, #0969da);
+  color: var(--fgColor-accent, #0969da);
+  font-weight: 600;
+}
 .zz-title { font-size: 16px; font-weight: 600; }
 .zz-meta { color: var(--fgColor-muted, #59636e); font-size: 12px; margin-top: 4px; }
 .zz-meta > * { margin-right: 6px; }
@@ -80,3 +87,54 @@ a:hover { text-decoration: underline; }
 .zz-signin h1 { margin-bottom: 8px; }
 .zz-signin p { color: var(--fgColor-muted, #59636e); margin-bottom: 24px; }
 .zz-actions > * { margin: 0 4px; }
+
+/* Per-item assistive conversation (docs/adr/0018). */
+.zz-thread-head { margin-bottom: 16px; }
+.zz-chat { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; }
+.zz-msg { padding: 10px 12px; border-radius: 12px; max-width: 80%; word-wrap: break-word; overflow-wrap: anywhere; }
+.zz-msg--user { align-self: flex-end; background: var(--bgColor-accent-emphasis, #0969da); color: #ffffff; white-space: pre-wrap; }
+.zz-msg--agent { align-self: flex-start; background: var(--bgColor-muted, #f6f8fa); border: 1px solid var(--borderColor-muted, #d1d9e0b3); }
+
+/* Rendered Markdown inside an agent bubble (docs/adr/0021). */
+.zz-msg--agent > :first-child { margin-top: 0; }
+.zz-msg--agent > :last-child { margin-bottom: 0; }
+.zz-msg--agent p { margin: 0.5em 0; }
+.zz-msg--agent ul, .zz-msg--agent ol { margin: 0.5em 0; padding-left: 1.5em; }
+.zz-msg--agent li { margin: 0.2em 0; }
+.zz-msg--agent h1, .zz-msg--agent h2, .zz-msg--agent h3,
+.zz-msg--agent h4, .zz-msg--agent h5, .zz-msg--agent h6 { margin: 0.6em 0 0.3em; font-size: 1em; font-weight: 600; }
+.zz-msg--agent a { color: var(--fgColor-accent, #0969da); }
+.zz-msg--agent pre {
+  background: var(--bgColor-default, #ffffff);
+  border: 1px solid var(--borderColor-muted, #d1d9e0b3);
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+.zz-msg--agent code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
+.zz-msg--agent :not(pre) > code {
+  background: var(--bgColor-neutral-muted, rgba(129, 139, 152, 0.12));
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+.zz-msg--agent blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.8em;
+  border-left: 3px solid var(--borderColor-muted, #d1d9e0b3);
+  color: var(--fgColor-muted, #59636e);
+}
+.zz-msg--agent table { border-collapse: collapse; margin: 0.5em 0; }
+.zz-msg--agent th, .zz-msg--agent td { border: 1px solid var(--borderColor-muted, #d1d9e0b3); padding: 4px 8px; }
+.zz-chat-form { display: flex; flex-direction: column; gap: 8px; }
+.zz-chat-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--borderColor-default, #d1d9e0);
+  border-radius: 6px;
+  font: inherit;
+  resize: vertical;
+  background: var(--bgColor-default, #ffffff);
+  color: var(--fgColor-default, #1f2328);
+}
+.zz-chat-form button { align-self: flex-end; }

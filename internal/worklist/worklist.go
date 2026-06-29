@@ -109,8 +109,9 @@ type WorkItem struct {
 	Source    string    `json:"source"` // "github"
 	Type      ItemType  `json:"type"`
 	GitHub    GitHubRef `json:"github"`
-	Signals   Signals   `json:"signals"` // observed facts that feed scoring
-	Meta      Metadata  `json:"zz"`      // ZZ's judgment derived from Signals
+	Signals   Signals   `json:"signals"`          // observed facts that feed scoring
+	Meta      Metadata  `json:"zz"`               // ZZ's judgment derived from Signals
+	Thread    []Message `json:"thread,omitempty"` // assistive conversation (ADR 0018)
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -158,6 +159,11 @@ type Signals struct {
 	// final score; nil when no ranker has run.
 	Proposed *AxisProposal `json:"proposed,omitempty"`
 
+	// Research holds the discussion-derived per-axis re-weighting (docs/adr/0022).
+	// It is a second INPUT layered on Proposed: Score multiplies the foundation
+	// axes by these factors. nil when no research pass has run (no thread).
+	Research *ResearchAdjustment `json:"research,omitempty"`
+
 	ObservedAt time.Time `json:"observed_at"` // freshness of this measurement
 }
 
@@ -169,6 +175,14 @@ type Store interface {
 	// write side used by agent ingestion; implementations scope every item to
 	// ownerID so an agent cannot write another user's data.
 	Upsert(ctx context.Context, ownerID string, items ...WorkItem) error
+}
+
+// Lister enumerates stored items across all owners. It is separate from the
+// owner-scoped Store because it is a cross-owner CONTROL-PLANE read, used by the
+// staleness reconciler to find items whose research re-weighting is stale
+// (docs/adr/0022); the request path never uses it.
+type Lister interface {
+	All(ctx context.Context) (map[string][]WorkItem, error)
 }
 
 // Ingestor starts the serialized agentic flow that backfills a user's work

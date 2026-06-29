@@ -22,3 +22,8 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0015](0015-llm-axes-authoritative.md) | LLM axis proposals are authoritative (retire the ratify clamp and confidence floor) | Accepted |
 | [0016](0016-server-rendered-landing-page.md) | A lean server-rendered landing page styled with vendored Primer | Accepted |
 | [0017](0017-hide-user-metadata-agents-unhide.md) | Hide is user-set metadata; agents auto-unhide on change | Accepted |
+| [0018](0018-per-item-assistive-conversation.md) | Per-item assistive conversation (read-only) | Accepted (synchronous turn superseded by 0019) |
+| [0019](0019-conversation-as-ephemeral-agent.md) | The assistive conversation is an ephemeral agent (async, live GitHub context) | Accepted |
+| [0020](0020-conversation-github-tool-use.md) | Read-only GitHub tool-use in the conversation (file@ref, PR/issue, search) | Accepted |
+| [0021](0021-render-assistant-markdown.md) | Render assistant Markdown to sanitized HTML (goldmark + bluemonday) | Accepted |
+| [0022](0022-discussion-research-axis-reweighting.md) | Discussion-derived "research" re-weighting of the ranking axes (per-axis multipliers) | Accepted |

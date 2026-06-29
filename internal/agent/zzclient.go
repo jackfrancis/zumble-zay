@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -144,4 +145,93 @@ func (c *ZZClient) ListWorklist(ctx context.Context, limit int) ([]worklist.Work
 		return nil, err
 	}
 	return body.Items, nil
+}
+
+// GetItem fetches a single persisted work item by ID: GET /agent/worklist?id=X.
+// The per-item converse runtime uses it to read the item and its conversation
+// thread before answering (docs/adr/0019).
+func (c *ZZClient) GetItem(ctx context.Context, id string) (worklist.WorkItem, error) {
+	u := c.baseURL + "/agent/worklist?id=" + url.QueryEscape(id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return worklist.WorkItem{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return worklist.WorkItem{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return worklist.WorkItem{}, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var body struct {
+		Items []worklist.WorkItem `json:"items"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&body); err != nil {
+		return worklist.WorkItem{}, err
+	}
+	if len(body.Items) == 0 {
+		return worklist.WorkItem{}, fmt.Errorf("item %q not found", id)
+	}
+	return body.Items[0], nil
+}
+
+// AppendMessage posts the assistant's reply back to an item's conversation
+// thread: POST /agent/thread?id=X. It is the converse runtime's write side of
+// the contract — the per-item counterpart to Ingest (docs/adr/0019). ZZ stamps
+// the message as agent-authored and persists it on the item.
+func (c *ZZClient) AppendMessage(ctx context.Context, id, content string) error {
+	body, err := json.Marshal(map[string]string{"content": content})
+	if err != nil {
+		return err
+	}
+	u := c.baseURL + "/agent/thread?id=" + url.QueryEscape(id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// SetResearch posts the discussion-derived research re-weighting for an item:
+// POST /agent/research?id=X. It is the github-research runtime's write side of
+// the contract (docs/adr/0022). ZZ applies the multipliers to the item's
+// foundation and re-scores it.
+func (c *ZZClient) SetResearch(ctx context.Context, id string, adj worklist.ResearchAdjustment) error {
+	body, err := json.Marshal(adj)
+	if err != nil {
+		return err
+	}
+	u := c.baseURL + "/agent/research?id=" + url.QueryEscape(id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }

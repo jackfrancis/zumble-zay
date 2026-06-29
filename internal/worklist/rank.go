@@ -53,3 +53,28 @@ func (s *StubRanker) Propose(_ context.Context, item WorkItem) (AxisProposal, er
 		Rationale:  "baseline (stub ranker)",
 	}, nil
 }
+
+// ResearchAdjustment is the discussion-derived re-weighting of the four
+// foundation axes (docs/adr/0022). Each multiplier scales the corresponding
+// foundation axis: 1.0 leaves it unchanged, <1 dampens, >1 amplifies. Multipliers
+// are bounded to [0,2] and the product to [0,1] when Score applies them. It is
+// the "research" layer: the GitHub metadata is the authoritative foundation, and
+// this expresses how the conversation's *evidence* (never mere assertion)
+// nuances it. The zero value is NOT neutral — 1.0 is; producers must set all four
+// (the LLM parser defaults an absent multiplier to 1.0).
+type ResearchAdjustment struct {
+	Relevance  float64   `json:"relevance"`
+	Impact     float64   `json:"impact"`
+	Engagement float64   `json:"engagement"`
+	Urgency    float64   `json:"urgency"`
+	Rationale  string    `json:"rationale,omitempty"`
+	AppliedAt  time.Time `json:"applied_at"`
+}
+
+// ResearchRanker proposes the research re-weighting for an item from its
+// conversation thread, layered on the foundation proposal. The real
+// implementation calls an LLM from an agent runtime; ZZ core depends only on this
+// interface so it never imports a model client (docs/adr/0006, 0022).
+type ResearchRanker interface {
+	Research(ctx context.Context, item WorkItem) (ResearchAdjustment, error)
+}

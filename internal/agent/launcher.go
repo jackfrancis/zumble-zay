@@ -20,6 +20,8 @@ type InProcessLauncher struct {
 	client        *http.Client
 	log           *slog.Logger
 	ranker        worklist.AxisRanker
+	converser     worklist.Conversationalist
+	researcher    worklist.ResearchRanker
 	aiEndpoint    string
 	aiModel       string
 	aiToken       string
@@ -49,6 +51,22 @@ func (l *InProcessLauncher) WithRanker(r worklist.AxisRanker) *InProcessLauncher
 	return l
 }
 
+// WithConverser sets the Conversationalist used by github-converse jobs. A nil
+// converser (the default) makes the runtime build one from the configured AI
+// token instead.
+func (l *InProcessLauncher) WithConverser(c worklist.Conversationalist) *InProcessLauncher {
+	l.converser = c
+	return l
+}
+
+// WithResearcher sets the ResearchRanker used by github-research jobs. A nil
+// researcher (the default) makes the runtime build one from the configured AI
+// token instead.
+func (l *InProcessLauncher) WithResearcher(r worklist.ResearchRanker) *InProcessLauncher {
+	l.researcher = r
+	return l
+}
+
 // WithAI configures the chat-model ranker for llm-rank jobs. When the token is
 // non-empty and no explicit ranker is set, the runtime builds a chat-model
 // ranker from these values; otherwise it falls back to the StubRanker.
@@ -72,7 +90,10 @@ func (l *InProcessLauncher) Launch(ctx context.Context, spec orchestrator.JobSpe
 		Client:        l.client,
 		Token:         token,
 		Provider:      spec.Provider,
+		ItemID:        spec.ItemID,
 		Ranker:        l.ranker,
+		Converser:     l.converser,
+		Researcher:    l.researcher,
 		AIEndpoint:    l.aiEndpoint,
 		AIModel:       l.aiModel,
 		AIToken:       l.aiToken,

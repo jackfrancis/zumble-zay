@@ -164,6 +164,133 @@ func TestIngestSuccessChainsEnrichment(t *testing.T) {
 	}
 }
 
+func TestConverseEnqueuesScopedPerItemJob(t *testing.T) {
+	m := mint.NewMinter([]byte(testSecret), time.Minute)
+	fl := &blockingLauncher{started: make(chan orchestrator.JobSpec, 4), release: make(chan struct{})}
+	o := orchestrator.New(m, fl, nil)
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(fl.release) }) }
+	defer o.Stop()
+	defer release()
+
+	const user = "github:7"
+	const item = "github:octo/repo#1"
+	if err := o.Converse(context.Background(), user, item); err != nil {
+		t.Fatalf("Converse: %v", err)
+	}
+
+	var spec orchestrator.JobSpec
+	select {
+	case spec = <-fl.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("converse runtime did not start")
+	}
+	if spec.Type != orchestrator.JobGitHubConverse {
+		t.Fatalf("job type = %q, want github-converse", spec.Type)
+	}
+	if spec.ItemID != item || spec.ActingUserID != user || spec.Provider != "github" {
+		t.Fatalf("unexpected spec: %+v", spec)
+	}
+
+	// A converse for the same user+item while one runs is deduped.
+	if err := o.Converse(context.Background(), user, item); err != nil {
+		t.Fatalf("second Converse: %v", err)
+	}
+	select {
+	case <-fl.started:
+		t.Fatal("expected per-item dedupe, but a second runtime started")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// A different item converses concurrently (the dedupe key includes the item).
+	if err := o.Converse(context.Background(), user, "github:octo/repo#2"); err != nil {
+		t.Fatalf("Converse other item: %v", err)
+	}
+	select {
+	case <-fl.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a distinct item should converse concurrently")
+	}
+
+	// The minted token carries only the converse scopes, never ScopeAll.
+	claims, err := m.Verify(fl.lastToken())
+	if err != nil {
+		t.Fatalf("verify token: %v", err)
+	}
+	if !hasScope(claims.Scopes, principal.ScopeSignalsRead) || !hasScope(claims.Scopes, principal.ScopeMetadataWrite) {
+		t.Fatalf("converse token missing scopes: %+v", claims.Scopes)
+	}
+	if hasScope(claims.Scopes, principal.ScopeAll) {
+		t.Fatal("converse token must not carry ScopeAll")
+	}
+
+	// Converse jobs must not make the worklist look like it is still ingesting.
+	if o.Active(user) {
+		t.Fatal("Active should exclude converse jobs")
+	}
+}
+
+func TestResearchEnqueuesScopedPerItemJobWithoutProvider(t *testing.T) {
+	m := mint.NewMinter([]byte(testSecret), time.Minute)
+	fl := &blockingLauncher{started: make(chan orchestrator.JobSpec, 4), release: make(chan struct{})}
+	o := orchestrator.New(m, fl, nil)
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(fl.release) }) }
+	defer o.Stop()
+	defer release()
+
+	const user = "github:7"
+	const item = "github:octo/repo#1"
+	if err := o.Research(context.Background(), user, item); err != nil {
+		t.Fatalf("Research: %v", err)
+	}
+
+	var spec orchestrator.JobSpec
+	select {
+	case spec = <-fl.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("research runtime did not start")
+	}
+	if spec.Type != orchestrator.JobGitHubResearch {
+		t.Fatalf("job type = %q, want github-research", spec.Type)
+	}
+	if spec.ItemID != item || spec.ActingUserID != user {
+		t.Fatalf("unexpected spec: %+v", spec)
+	}
+	// Research reasons over stored ZZ data only — no provider credential.
+	if spec.Provider != "" {
+		t.Fatalf("research job should carry no provider, got %q", spec.Provider)
+	}
+
+	// Per-item dedupe.
+	if err := o.Research(context.Background(), user, item); err != nil {
+		t.Fatalf("second Research: %v", err)
+	}
+	select {
+	case <-fl.started:
+		t.Fatal("expected per-item dedupe, but a second runtime started")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	claims, err := m.Verify(fl.lastToken())
+	if err != nil {
+		t.Fatalf("verify token: %v", err)
+	}
+	if !hasScope(claims.Scopes, principal.ScopeSignalsRead) || !hasScope(claims.Scopes, principal.ScopeMetadataWrite) {
+		t.Fatalf("research token missing scopes: %+v", claims.Scopes)
+	}
+	if claims.Provider != "" {
+		t.Fatalf("research token provider = %q, want empty", claims.Provider)
+	}
+
+	// Research must not make the worklist look like it is still ingesting.
+	if o.Active(user) {
+		t.Fatal("Active should exclude research jobs")
+	}
+}
+
 func hasScope(scopes []principal.Scope, want principal.Scope) bool {
 	for _, s := range scopes {
 		if s == want {

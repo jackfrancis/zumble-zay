@@ -15,6 +15,7 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(log)
 
 	p, err := agent.ParamsFromEnv(os.Getenv)
 	if err != nil {

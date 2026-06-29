@@ -25,6 +25,7 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(log)
 
 	cfg, err := config.Load()
 	if err != nil {

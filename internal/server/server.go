@@ -13,6 +13,7 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/mint"
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 	"github.com/jackfrancis/zumble-zay/internal/principal"
+	"github.com/jackfrancis/zumble-zay/internal/reconcile"
 	"github.com/jackfrancis/zumble-zay/internal/session"
 	"github.com/jackfrancis/zumble-zay/internal/vault"
 	"github.com/jackfrancis/zumble-zay/internal/webui"
@@ -49,7 +50,14 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	worklistHandler := api.NewWorklistHandler(store, orch)
 	credentialHandler := api.NewCredentialHandler(authH)
 	ingestHandler := api.NewIngestHandler(store)
-	webHandler := webui.New(sessions, store, orch, authH)
+	// The assistive conversation runs as an ephemeral converse runtime spawned by
+	// the orchestrator (docs/adr/0019); the HTTP layer only enqueues turns. It is
+	// available when a chat model is configured.
+	convEnabled := cfg.AI.Token != ""
+	threadHandler := api.NewThreadHandler(store, orch, convEnabled)
+	agentThreadHandler := api.NewAgentThreadHandler(store)
+	agentResearchHandler := api.NewAgentResearchHandler(store)
+	webHandler := webui.New(sessions, store, orch, authH, convEnabled)
 
 	mux := http.NewServeMux()
 
@@ -65,6 +73,13 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	// Hide an item from the landing page (docs/adr/0017). The handler checks the
 	// session itself and uses Post/Redirect/Get.
 	mux.Handle("POST /items/hide", http.HandlerFunc(webHandler.Hide))
+	// Per-item assistive conversation (docs/adr/0018, 0019): the thread page, the
+	// JSON turn endpoint the page posts to, and the poll endpoint it reads. A turn
+	// is answered asynchronously by a spawned converse runtime.
+	mux.Handle("GET /items/thread", http.HandlerFunc(webHandler.Thread))
+	mux.Handle("POST /api/thread", authenticator.RequireAuth(http.HandlerFunc(threadHandler.Post)))
+	mux.Handle("GET /api/thread", authenticator.RequireAuth(http.HandlerFunc(threadHandler.Get)))
+	mux.Handle("POST /api/thread/resume", authenticator.RequireAuth(http.HandlerFunc(threadHandler.Resume)))
 
 	// Auth lifecycle.
 	mux.HandleFunc("GET /auth/providers", func(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +120,12 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	// ingest is the runtime's output sink back into ZZ.
 	mux.Handle("POST /agent/credentials/{provider}", authenticator.RequireScope(principal.ScopeSignalsRead, http.HandlerFunc(credentialHandler.Vend)))
 	mux.Handle("POST /agent/worklist", authenticator.RequireScope(principal.ScopeMetadataWrite, http.HandlerFunc(ingestHandler.Ingest)))
+	// Converse write-back: a spawned converse runtime posts the assistant's reply
+	// for an item here (docs/adr/0019).
+	mux.Handle("POST /agent/thread", authenticator.RequireScope(principal.ScopeMetadataWrite, http.HandlerFunc(agentThreadHandler.Append)))
+	// Research write-back: a spawned github-research runtime posts the per-axis
+	// re-weighting multipliers for an item here (docs/adr/0022).
+	mux.Handle("POST /agent/research", authenticator.RequireScope(principal.ScopeMetadataWrite, http.HandlerFunc(agentResearchHandler.Set)))
 	// Read path: a runtime reads its acting user's persisted work to augment it
 	// in place (docs/adr/0010) rather than re-deriving it from the provider.
 	mux.Handle("GET /agent/worklist", authenticator.RequireScope(principal.ScopeSignalsRead, http.HandlerFunc(ingestHandler.List)))
@@ -115,7 +136,23 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	h = securityHeaders(h)
 	h = logRequests(log, h)
 	h = recoverer(log, h)
-	return h, orch.Stop
+
+	// Staleness reconciler: when the store can enumerate items, periodically
+	// re-rank those whose discussion-derived research has gone stale, enqueuing
+	// per-item research jobs through the orchestrator (docs/adr/0022). At
+	// replicas:1 it is a single goroutine; leader-gate it past that (ADR 0007).
+	stopReconcile := func() {}
+	if lister, ok := store.(worklist.Lister); ok {
+		rec := reconcile.New(lister, orch, reconcile.DefaultInterval, log)
+		rec.Start()
+		stopReconcile = rec.Stop
+	}
+
+	cleanup := func() {
+		stopReconcile()
+		orch.Stop()
+	}
+	return h, cleanup
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

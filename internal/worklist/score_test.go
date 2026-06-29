@@ -96,3 +96,49 @@ func TestScoreEmptySignalsIsInert(t *testing.T) {
 		t.Errorf("empty signals should have no explanation: contributions=%d rationale=%q", len(m.Contributions), m.Rationale)
 	}
 }
+
+func TestScoreAppliesResearchMultipliers(t *testing.T) {
+	now := time.Now().UTC()
+	item := WorkItem{Signals: Signals{
+		Proposed: &AxisProposal{Relevance: 0.8, Impact: 0.8, Engagement: 0.5, Urgency: 0.8, Rationale: "foundation"},
+		Research: &ResearchAdjustment{Relevance: 1.0, Impact: 0.9, Engagement: 1.0, Urgency: 0.5, Rationale: "upstream declined the backport"},
+	}}
+
+	m := Score(item, now)
+
+	if !approxEq(m.Relevance, 0.8) {
+		t.Errorf("relevance = %v, want 0.8 (×1.0)", m.Relevance)
+	}
+	if !approxEq(m.Impact, 0.72) {
+		t.Errorf("impact = %v, want 0.72 (0.8×0.9)", m.Impact)
+	}
+	if !approxEq(m.Engagement, 0.5) {
+		t.Errorf("engagement = %v, want 0.5 (×1.0)", m.Engagement)
+	}
+	if !approxEq(m.Urgency, 0.4) {
+		t.Errorf("urgency = %v, want 0.4 (0.8×0.5)", m.Urgency)
+	}
+	// The research rationale supersedes the foundation rationale as the headline.
+	if m.Rationale != "upstream declined the backport" {
+		t.Errorf("rationale = %q, want the research rationale", m.Rationale)
+	}
+}
+
+func TestScoreResearchClampsProductToUnit(t *testing.T) {
+	now := time.Now().UTC()
+	item := WorkItem{Signals: Signals{
+		Proposed: &AxisProposal{Relevance: 0.8, Impact: 0.5, Engagement: 0.5, Urgency: 0.5},
+		Research: &ResearchAdjustment{Relevance: 2.0, Impact: 1.0, Engagement: 1.0, Urgency: 1.0},
+	}}
+	if got := Score(item, now).Relevance; got != 1.0 {
+		t.Errorf("relevance = %v, want 1.0 (0.8×2.0 clamped to [0,1])", got)
+	}
+}
+
+func approxEq(a, b float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d < 1e-9
+}

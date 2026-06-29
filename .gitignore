@@ -17,3 +17,9 @@
 # Test / coverage output
 *.test
 coverage.out
+
+# Local scratch / runtime artifacts
+/runtime
+conversation.txt
+models.json
+output.json

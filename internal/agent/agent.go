@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,26 +27,31 @@ import (
 
 // RunParams configures a single runtime invocation.
 type RunParams struct {
-	JobType       string              // selects the runtime: github-ingest|github-enrich|llm-rank
-	BaseURL       string              // ZZ base URL (loopback in-process today)
-	GitHubBaseURL string              // GitHub API base; empty uses the public API
-	Client        *http.Client        // shared HTTP client
-	Token         string              // ZZ job token (bearer)
-	Provider      string              // e.g. "github"
-	EnrichLimit   int                 // max items to enrich per run; 0 uses the default
-	Ranker        worklist.AxisRanker // axis ranker for llm-rank jobs; nil uses the stub
-	AIEndpoint    string              // chat-completions URL for the llm-rank ranker
-	AIModel       string              // ranking model id; empty uses the llm default
-	AIToken       string              // bearer token for the ranking model; empty falls back to the stub
+	JobType       string                     // selects the runtime: github-ingest|github-enrich|llm-rank|github-converse
+	BaseURL       string                     // ZZ base URL (loopback in-process today)
+	GitHubBaseURL string                     // GitHub API base; empty uses the public API
+	Client        *http.Client               // shared HTTP client
+	Token         string                     // ZZ job token (bearer)
+	Provider      string                     // e.g. "github"
+	ItemID        string                     // target work item for a per-item job (github-converse)
+	EnrichLimit   int                        // max items to enrich per run; 0 uses the default
+	Ranker        worklist.AxisRanker        // axis ranker for llm-rank jobs; nil uses the stub
+	Converser     worklist.Conversationalist // assistant for github-converse jobs; nil builds one from the AI token
+	Researcher    worklist.ResearchRanker    // research re-ranker for github-research jobs; nil builds one from the AI token
+	AIEndpoint    string                     // chat-completions URL for the llm-rank ranker
+	AIModel       string                     // ranking model id; empty uses the llm default
+	AIToken       string                     // bearer token for the ranking model; empty falls back to the stub
 }
 
 // Runtime job types. These values are the contract between the orchestrator
 // (which schedules jobs) and the runtime (which executes them); they must match
 // the orchestrator's JobType constants. See docs/adr/0012.
 const (
-	JobIngest = "github-ingest"
-	JobEnrich = "github-enrich"
-	JobRank   = "llm-rank"
+	JobIngest   = "github-ingest"
+	JobEnrich   = "github-enrich"
+	JobRank     = "llm-rank"
+	JobConverse = "github-converse"
+	JobResearch = "github-research"
 )
 
 // Runtime job budgets. The llm-rank job makes one slow chat-model call per
@@ -60,7 +66,7 @@ const (
 // bounded by the orchestrator's per-stage deadline instead; the two are kept in
 // step so a job has the same budget on either substrate.
 func JobTimeout(jobType string) time.Duration {
-	if jobType == JobRank {
+	if jobType == JobRank || jobType == JobConverse || jobType == JobResearch {
 		return rankJobTimeout
 	}
 	return defaultJobTimeout
@@ -76,6 +82,10 @@ func Run(ctx context.Context, p RunParams) error {
 		return runEnrich(ctx, p)
 	case JobRank:
 		return runRank(ctx, p)
+	case JobConverse:
+		return runConverse(ctx, p)
+	case JobResearch:
+		return runResearch(ctx, p)
 	case JobIngest:
 		return runIngest(ctx, p)
 	default:
@@ -96,11 +106,67 @@ func rankerFor(p RunParams) worklist.AxisRanker {
 			Endpoint: p.AIEndpoint,
 			Model:    p.AIModel,
 			Token:    p.AIToken,
-			Client:   p.Client,
+			Client:   modelHTTPClient(p.Client),
 		})
 	default:
 		return worklist.NewStubRanker()
 	}
+}
+
+// converserFor builds the Conversationalist for a github-converse job. An
+// explicitly injected converser wins (tests, or an in-process WithConverser
+// seam); otherwise one is built from the AI token configured for the runtime.
+// With neither there is no assistant, so the job cannot proceed (the server
+// gates the endpoint on the same token, so this is defence in depth).
+func converserFor(p RunParams) worklist.Conversationalist {
+	switch {
+	case p.Converser != nil:
+		return p.Converser
+	case p.AIToken != "":
+		return llm.NewConverser(llm.Config{
+			Endpoint: p.AIEndpoint,
+			Model:    p.AIModel,
+			Token:    p.AIToken,
+			Client:   modelHTTPClient(p.Client),
+		})
+	default:
+		return nil
+	}
+}
+
+// researchRankerFor selects the ResearchRanker for a github-research job: an
+// explicitly injected ranker wins (tests, or the in-process WithResearcher seam);
+// otherwise one is built from the AI token; with neither there is no ranker, so
+// the job cannot proceed (docs/adr/0022).
+func researchRankerFor(p RunParams) worklist.ResearchRanker {
+	switch {
+	case p.Researcher != nil:
+		return p.Researcher
+	case p.AIToken != "":
+		return llm.NewResearchRanker(llm.Config{
+			Endpoint: p.AIEndpoint,
+			Model:    p.AIModel,
+			Token:    p.AIToken,
+			Client:   modelHTTPClient(p.Client),
+		})
+	default:
+		return nil
+	}
+}
+
+// modelHTTPClient returns the HTTP client for chat-model calls. It reuses the
+// shared client's Transport (any proxy/TLS config and its connection pool) but
+// drops the client-level timeout: a chat model — Opus with extended thinking —
+// can take far longer to return headers than the bounded ZZ and GitHub REST
+// calls the shared client is sized for, so the per-job context deadline is the
+// only budget (docs/adr/0019). A short client timeout here would preempt that
+// budget; the request still aborts when the job context is cancelled.
+func modelHTTPClient(shared *http.Client) *http.Client {
+	c := &http.Client{} // Timeout 0: bounded by the request context instead
+	if shared != nil {
+		c.Transport = shared.Transport
+	}
+	return c
 }
 
 // runIngest executes the github-ingest job: vend the provider credential from
@@ -266,6 +332,134 @@ func runRank(ctx context.Context, p RunParams) error {
 	}
 	if err := zz.Ingest(ctx, changed); err != nil {
 		return fmt.Errorf("ingest: %w", err)
+	}
+	return nil
+}
+
+// runConverse is the github-converse runtime: it answers one turn of a user's
+// assistive conversation about a single item (docs/adr/0019). It reads the item
+// (with its thread) from ZZ, fetches the item's live GitHub context — the PR or
+// issue description, its discussion, and (for PRs) the changed files — with the
+// user's vended credential, asks the Conversationalist for a reply, and writes
+// that reply back to the item's thread. It is read-only with respect to GitHub:
+// it only reads from the provider and only ever writes back to ZZ (docs/adr/0006).
+func runConverse(ctx context.Context, p RunParams) error {
+	if p.Client == nil {
+		p.Client = &http.Client{Timeout: 30 * time.Second}
+	}
+	if p.ItemID == "" {
+		return fmt.Errorf("converse: missing item id")
+	}
+	conv := converserFor(p)
+	if conv == nil {
+		return fmt.Errorf("converse: no assistant configured")
+	}
+	zz := NewZZClient(p.BaseURL, p.Token, p.Client)
+
+	item, err := zz.GetItem(ctx, p.ItemID)
+	if err != nil {
+		return fmt.Errorf("get item: %w", err)
+	}
+	history, userText, ok := lastUserTurn(item.Thread)
+	if !ok {
+		return nil // the final turn is already the assistant's; nothing to answer
+	}
+
+	// Best-effort live context plus read-only GitHub tools: a vend failure (e.g.
+	// no credential) leaves the assistant reasoning over the item's ZZ metadata
+	// alone, exactly as the in-process path did. With a credential it gets both a
+	// pre-fetched snapshot of the item and tools to look up anything else
+	// (docs/adr/0018, 0019, 0020).
+	var (
+		sourceContext string
+		tools         worklist.ToolBox
+	)
+	if cred, err := zz.VendCredential(ctx, p.Provider); err == nil {
+		gh := github.NewClient(p.Client, p.GitHubBaseURL)
+		isPR := item.Type == worklist.TypePullRequest
+		if disc, err := gh.Discussion(ctx, cred.AccessToken, item.GitHub.Repo, item.GitHub.Number, isPR); err == nil {
+			sourceContext = formatDiscussion(disc)
+		}
+		tools = newGitHubToolBox(gh, cred.AccessToken, item.GitHub.Repo)
+	}
+
+	reply, err := conv.Reply(ctx, item, sourceContext, history, userText, tools)
+	if err != nil {
+		return fmt.Errorf("assistant reply: %w", err)
+	}
+	if err := zz.AppendMessage(ctx, p.ItemID, reply); err != nil {
+		return fmt.Errorf("append message: %w", err)
+	}
+	return nil
+}
+
+// lastUserTurn splits a thread into the prior history and the final unanswered
+// user message. It returns ok=false when the thread is empty or already ends
+// with an assistant turn, so a duplicate or out-of-order job is a safe no-op.
+func lastUserTurn(thread []worklist.Message) ([]worklist.Message, string, bool) {
+	n := len(thread)
+	if n == 0 || thread[n-1].Role != worklist.RoleUser {
+		return nil, "", false
+	}
+	return thread[:n-1], thread[n-1].Content, true
+}
+
+// formatDiscussion renders the fetched GitHub context as compact plain text. The
+// content is untrusted (PR bodies and comments are attacker-influenceable), so
+// the converser wraps it in an explicit "treat as data, not instructions" frame
+// (docs/adr/0019); the github client has already bounded its size.
+func formatDiscussion(d github.Discussion) string {
+	var b strings.Builder
+	if d.Body != "" {
+		fmt.Fprintf(&b, "Description:\n%s\n", d.Body)
+	}
+	if len(d.ChangedFiles) > 0 {
+		fmt.Fprintf(&b, "\nChanged files (%d):\n", len(d.ChangedFiles))
+		for _, f := range d.ChangedFiles {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+	}
+	if len(d.Comments) > 0 {
+		fmt.Fprintf(&b, "\nDiscussion (%d most recent comments):\n", len(d.Comments))
+		for _, c := range d.Comments {
+			author := c.Author
+			if author == "" {
+				author = "someone"
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", author, c.Body)
+		}
+	}
+	return b.String()
+}
+
+// runResearch is the github-research runtime: it re-weights one item's ranking
+// axes from its conversation thread (docs/adr/0022). It reads the item — with its
+// cached foundation proposal and thread — from ZZ, asks the ResearchRanker for
+// the per-axis multipliers, and writes them back. It reads and writes ZZ only
+// (no provider credential); a thread-less item yields a neutral, no-op result.
+func runResearch(ctx context.Context, p RunParams) error {
+	if p.Client == nil {
+		p.Client = &http.Client{Timeout: 30 * time.Second}
+	}
+	if p.ItemID == "" {
+		return fmt.Errorf("research: missing item id")
+	}
+	ranker := researchRankerFor(p)
+	if ranker == nil {
+		return fmt.Errorf("research: no ranker configured")
+	}
+	zz := NewZZClient(p.BaseURL, p.Token, p.Client)
+
+	item, err := zz.GetItem(ctx, p.ItemID)
+	if err != nil {
+		return fmt.Errorf("get item: %w", err)
+	}
+	adj, err := ranker.Research(ctx, item)
+	if err != nil {
+		return fmt.Errorf("research: %w", err)
+	}
+	if err := zz.SetResearch(ctx, p.ItemID, adj); err != nil {
+		return fmt.Errorf("set research: %w", err)
 	}
 	return nil
 }

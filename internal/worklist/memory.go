@@ -17,6 +17,11 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{items: make(map[string][]WorkItem)}
 }
 
+var (
+	_ Store  = (*MemoryStore)(nil)
+	_ Lister = (*MemoryStore)(nil)
+)
+
 // List returns a copy of the owner's work items.
 func (s *MemoryStore) List(_ context.Context, ownerID string) ([]WorkItem, error) {
 	s.mu.RLock()
@@ -32,6 +37,20 @@ func (s *MemoryStore) Seed(ownerID string, items ...WorkItem) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.items[ownerID] = items
+}
+
+// All returns a copy of every owner's items, for the staleness reconciler
+// (docs/adr/0022). It is the cross-owner read behind worklist.Lister.
+func (s *MemoryStore) All(_ context.Context) (map[string][]WorkItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string][]WorkItem, len(s.items))
+	for owner, src := range s.items {
+		items := make([]WorkItem, len(src))
+		copy(items, src)
+		out[owner] = items
+	}
+	return out, nil
 }
 
 // Upsert adds or replaces an owner's items keyed by WorkItem.ID. Every item is

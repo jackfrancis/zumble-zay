@@ -19,6 +19,7 @@ func runtimeEnvVars(cfg Config, spec orchestrator.JobSpec, token string) []corev
 		BaseURL:       cfg.ZZBaseURL,
 		Token:         token,
 		Provider:      spec.Provider,
+		ItemID:        spec.ItemID,
 		GitHubBaseURL: cfg.GitHubBaseURL,
 		AIEndpoint:    cfg.AIEndpoint,
 		AIModel:       cfg.AIModel,
