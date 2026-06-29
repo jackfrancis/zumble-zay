@@ -102,6 +102,23 @@ func (NoopLauncher) Launch(context.Context, JobSpec, string) (Handle, error) {
 	return Handle{Kind: "noop"}, nil
 }
 
+// AsyncLauncher is an optional capability a Launcher may add to separate
+// dispatching a workload from awaiting its completion (docs/adr/0024). The
+// orchestrator prefers it when present: Dispatch runs on the bounded worker pool
+// (so concurrent substrate creates stay bounded), while Await runs on its own
+// goroutine (so a long-running job never pins a worker, and completion can be
+// observed by watching the substrate). Await must derive everything it needs
+// from the Handle, so the orchestrator can call it on a separate goroutine with
+// no shared launcher state — and the orchestrator, owning that goroutine, keeps
+// the same panic isolation and per-job deadline it applies to a blocking Launch.
+// A Launcher that does not implement this is still fully supported: its blocking
+// Launch is simply run off the dispatch worker.
+type AsyncLauncher interface {
+	Launcher
+	Dispatch(ctx context.Context, spec JobSpec, token string) (Handle, error)
+	Await(ctx context.Context, handle Handle) error
+}
+
 // Job is the tracked lifecycle record for one unit of agent work.
 type Job struct {
 	ID           string
@@ -174,12 +191,14 @@ type Orchestrator struct {
 
 	queue chan string // jobID
 
-	mu       sync.Mutex
-	jobs     map[string]*Job
-	inflight map[string]bool // dedupe key: actingUserID + "/" + JobType
-	closed   bool
+	mu          sync.Mutex
+	jobs        map[string]*Job
+	inflight    map[string]bool       // dedupe key: actingUserID + "/" + JobType
+	completions map[string]chan error // jobID -> runtime callback completion signal (docs/adr/0024)
+	closed      bool
 
-	wg sync.WaitGroup
+	wg       sync.WaitGroup // dispatch workers draining the queue
+	awaiters sync.WaitGroup // in-flight launch/await goroutines (docs/adr/0024)
 }
 
 // New starts an orchestrator with a small worker pool. A nil launcher uses
@@ -189,13 +208,14 @@ func New(minter *mint.Minter, launcher Launcher, log *slog.Logger) *Orchestrator
 		launcher = NoopLauncher{}
 	}
 	o := &Orchestrator{
-		minter:   minter,
-		launcher: launcher,
-		log:      log,
-		jobTTL:   defaultJobTTL,
-		queue:    make(chan string, queueDepth),
-		jobs:     make(map[string]*Job),
-		inflight: make(map[string]bool),
+		minter:      minter,
+		launcher:    launcher,
+		log:         log,
+		jobTTL:      defaultJobTTL,
+		queue:       make(chan string, queueDepth),
+		jobs:        make(map[string]*Job),
+		inflight:    make(map[string]bool),
+		completions: make(map[string]chan error),
 	}
 	for i := 0; i < defaultWorkers; i++ {
 		o.wg.Add(1)
@@ -238,6 +258,37 @@ func (o *Orchestrator) Research(_ context.Context, ownerID, itemID string) error
 	return o.enqueue(JobGitHubResearch, ownerID, itemID)
 }
 
+// MintJobToken issues a job-scoped token for an authenticated control-plane
+// caller (docs/adr/0024): the pull complement to the push-at-dispatch path, for
+// long-lived service runtimes (e.g. kagent) that are not born per job and so
+// request a fresh token per task rather than receiving one at spawn. It applies
+// the same runtime-type policy as dispatch (the job type's provider and scopes)
+// and returns the signed token with its lifetime. It does not create a tracked
+// Job — the caller runs the work itself; provenance still flows from the token's
+// job id. Caller authentication and any per-caller constraint are enforced before
+// this is reached (the control API's token endpoint).
+func (o *Orchestrator) MintJobToken(jobType, actingUser string) (string, time.Duration, error) {
+	if actingUser == "" {
+		return "", 0, fmt.Errorf("orchestrator: token request requires an acting user")
+	}
+	pol, ok := policies[JobType(jobType)]
+	if !ok {
+		return "", 0, fmt.Errorf("orchestrator: unknown job type %q", jobType)
+	}
+	jid := "exch-" + newID()
+	tok, err := o.minter.Mint(mint.Claims{
+		Subject:      "runtime-" + jid,
+		ActingUserID: actingUser,
+		Scopes:       pol.scopes,
+		JobID:        jid,
+		Provider:     pol.provider,
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	return tok, o.minter.TTL(), nil
+}
+
 // enqueue records a job and queues it for a worker. itemID is empty for the
 // whole-worklist pipeline stages and set for per-item jobs (github-converse); it
 // is part of the dedupe key so distinct items can converse concurrently while a
@@ -253,12 +304,11 @@ func (o *Orchestrator) enqueue(t JobType, ownerID, itemID string) error {
 	}
 
 	o.mu.Lock()
+	defer o.mu.Unlock()
 	if o.closed {
-		o.mu.Unlock()
 		return fmt.Errorf("orchestrator: closed")
 	}
 	if o.inflight[key] {
-		o.mu.Unlock()
 		return nil // idempotent: a job for this dedupe key is already pending/running
 	}
 	id := newID()
@@ -267,19 +317,18 @@ func (o *Orchestrator) enqueue(t JobType, ownerID, itemID string) error {
 		ID: id, Type: t, Provider: pol.provider, ActingUserID: ownerID, ItemID: itemID,
 		State: StatePending, CreatedAt: now, UpdatedAt: now,
 	}
-	o.inflight[key] = true
-	o.mu.Unlock()
-
+	// Enqueue under the lock with a non-blocking send, paired with Stop closing
+	// the queue under the same lock: a send therefore never races the close (no
+	// send-on-closed-channel panic), and the non-blocking select cannot deadlock
+	// while the lock is held (workers receive without it).
 	select {
 	case o.queue <- id:
+		o.inflight[key] = true
 		return nil
 	default:
-		o.mu.Lock()
 		o.jobs[id].State = StateFailed
 		o.jobs[id].Err = "queue full"
 		o.jobs[id].UpdatedAt = time.Now().UTC()
-		delete(o.inflight, key)
-		o.mu.Unlock()
 		return fmt.Errorf("orchestrator: queue full")
 	}
 }
@@ -312,62 +361,191 @@ func (o *Orchestrator) run(id string) {
 	// token's subject is the ephemeral runtime, so writes trace runtime → job →
 	// user (docs/adr/0002).
 	token, err := o.minter.Mint(mint.Claims{
-		Subject:      "runtime-" + job.ID,
-		ActingUserID: job.ActingUserID,
+		Subject:      "runtime-" + spec.JobID,
+		ActingUserID: spec.ActingUserID,
 		Scopes:       pol.scopes,
-		JobID:        job.ID,
+		JobID:        spec.JobID,
 		Provider:     pol.provider,
 	})
-	var handle Handle
-	if err == nil {
-		handle, err = o.safeLaunch(spec, token)
+	if err != nil {
+		o.finish(id, key, Handle{}, err)
+		return
 	}
 
+	// Completion is decoupled from the dispatch worker (docs/adr/0024): the await
+	// runs on its own goroutine so a slow job never pins a worker, and the
+	// per-job deadline bounds it. An AsyncLauncher splits create (Dispatch, on the
+	// worker so concurrent creates stay bounded) from watch (Await, off it); a
+	// plain Launcher's blocking Launch is run off the worker just the same.
+	ctx, cancel := context.WithTimeout(context.Background(), o.deadlineFor(spec.Type))
+
+	if al, ok := o.launcher.(AsyncLauncher); ok {
+		handle, derr := o.safeDispatch(al, ctx, spec, token)
+		if derr != nil {
+			cancel()
+			o.finish(id, key, handle, derr)
+			return
+		}
+		o.setHandle(id, handle)
+		completion := o.registerCompletion(spec.JobID)
+		o.awaiters.Add(1)
+		go func() {
+			defer o.awaiters.Done()
+			defer cancel()
+			defer o.deregisterCompletion(spec.JobID)
+			// Completion can arrive two ways (docs/adr/0009, 0024): the runtime's
+			// callback (the fast happy path) or the launcher's substrate watch (the
+			// failure/timeout backstop). Race them; the first wins and the deferred
+			// ctx cancel unwinds the loser.
+			watch := make(chan error, 1)
+			go func() { watch <- o.safeAwait(al, ctx, handle) }()
+			select {
+			case err := <-completion:
+				o.finish(id, key, handle, err)
+			case err := <-watch:
+				o.finish(id, key, handle, err)
+			}
+		}()
+		return
+	}
+
+	o.awaiters.Add(1)
+	go func() {
+		defer o.awaiters.Done()
+		defer cancel()
+		handle, lerr := o.safeLaunch(ctx, spec, token)
+		o.finish(id, key, handle, lerr)
+	}()
+}
+
+// finish records a job's terminal outcome, drops it from the in-flight set, and
+// chains the next pipeline stage on success. It is the single place a job is
+// finalized — called exactly once per job, from whichever goroutine awaited it.
+func (o *Orchestrator) finish(id, key string, handle Handle, err error) {
 	o.mu.Lock()
+	job := o.jobs[id]
+	if job == nil {
+		o.mu.Unlock()
+		return
+	}
 	job.Handle = handle
 	if err != nil {
 		job.State = StateFailed
 		job.Err = err.Error()
-		if o.log != nil {
-			o.log.Error("agent job failed", "job", job.ID, "user", job.ActingUserID, "type", job.Type, "err", err)
-		}
 	} else {
 		job.State = StateSucceeded
-		if o.log != nil {
-			o.log.Info("agent job succeeded", "job", job.ID, "user", job.ActingUserID, "type", job.Type)
-		}
 	}
 	job.UpdatedAt = time.Now().UTC()
 	jobType, user := job.Type, job.ActingUserID
 	delete(o.inflight, key)
 	o.mu.Unlock()
 
+	if err != nil {
+		if o.log != nil {
+			o.log.Error("agent job failed", "job", id, "user", user, "type", jobType, "err", err)
+		}
+		return
+	}
+	if o.log != nil {
+		o.log.Info("agent job succeeded", "job", id, "user", user, "type", jobType)
+	}
+
 	// Pipeline: each successful stage hands off to the next (ingest -> enrich ->
 	// llm-rank). Each stage is a distinct capability (its own scopes, rate-limit
 	// budget, and failure domain); the final stage does not chain further.
-	if err == nil {
-		if next, ok := nextStage(jobType); ok {
-			if e := o.enqueue(next, user, ""); e != nil && o.log != nil {
-				o.log.Warn("could not enqueue next pipeline stage", "stage", next, "user", user, "err", e)
-			}
+	if next, ok := nextStage(jobType); ok {
+		if e := o.enqueue(next, user, ""); e != nil && o.log != nil {
+			o.log.Warn("could not enqueue next pipeline stage", "stage", next, "user", user, "err", e)
 		}
 	}
 }
 
-// safeLaunch invokes the launcher with the per-job deadline, converting a
-// launcher panic into an ordinary job failure. A launcher runs substrate code
-// (a client library, a nil dereference) outside the request goroutine, so
-// without this a panic would crash the whole server rather than failing one
-// job — recoverer only guards request goroutines.
-func (o *Orchestrator) safeLaunch(spec JobSpec, token string) (handle Handle, err error) {
+// setHandle records where an async job's workload was dispatched, before it
+// completes, so a running job already shows its substrate location (docs/adr/0012).
+func (o *Orchestrator) setHandle(id string, handle Handle) {
+	o.mu.Lock()
+	if job := o.jobs[id]; job != nil {
+		job.Handle = handle
+	}
+	o.mu.Unlock()
+}
+
+// registerCompletion arms a one-shot channel the runtime's completion callback
+// can signal for jobID (docs/adr/0024); the await goroutine races it against the
+// launcher's watch. deregisterCompletion clears it once the job is finalized.
+func (o *Orchestrator) registerCompletion(jobID string) chan error {
+	ch := make(chan error, 1)
+	o.mu.Lock()
+	o.completions[jobID] = ch
+	o.mu.Unlock()
+	return ch
+}
+
+func (o *Orchestrator) deregisterCompletion(jobID string) {
+	o.mu.Lock()
+	delete(o.completions, jobID)
+	o.mu.Unlock()
+}
+
+// CompleteJob delivers a runtime's terminal completion for jobID — an empty
+// errMsg is success, otherwise failure (docs/adr/0024). It is the pull-side
+// counterpart to the launcher's watch: whichever reports first finalizes the
+// job. An unknown or already-finalized jobID is a no-op (the watch handled it,
+// or there is nothing to await — e.g. an in-process job whose completion is its
+// Launch return).
+func (o *Orchestrator) CompleteJob(jobID, errMsg string) {
+	o.mu.Lock()
+	ch, ok := o.completions[jobID]
+	o.mu.Unlock()
+	if !ok {
+		return
+	}
+	var err error
+	if errMsg != "" {
+		err = fmt.Errorf("runtime reported failure: %s", errMsg)
+	}
+	select {
+	case ch <- err:
+	default: // already signalled; ignore the duplicate
+	}
+}
+
+// safeLaunch invokes a blocking launcher under ctx, converting a launcher panic
+// into an ordinary job failure. A launcher runs substrate code (a client
+// library, a nil dereference) outside the request goroutine, so without this a
+// panic would crash the whole process rather than failing one job — recoverer
+// only guards request goroutines.
+func (o *Orchestrator) safeLaunch(ctx context.Context, spec JobSpec, token string) (handle Handle, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			err = fmt.Errorf("launcher panicked: %v", rec)
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), o.deadlineFor(spec.Type))
-	defer cancel()
 	return o.launcher.Launch(ctx, spec, token)
+}
+
+// safeDispatch starts an async launcher's workload, recovering a panic as a job
+// failure (as safeLaunch does for blocking launchers).
+func (o *Orchestrator) safeDispatch(al AsyncLauncher, ctx context.Context, spec JobSpec, token string) (handle Handle, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("launcher panicked: %v", rec)
+		}
+	}()
+	return al.Dispatch(ctx, spec, token)
+}
+
+// safeAwait waits for an async launcher's workload to complete, recovering a
+// panic as a job failure. The orchestrator owns this goroutine (not the
+// launcher), so the same panic guard and per-job deadline apply as for a
+// blocking Launch.
+func (o *Orchestrator) safeAwait(al AsyncLauncher, ctx context.Context, handle Handle) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("launcher panicked: %v", rec)
+		}
+	}()
+	return al.Await(ctx, handle)
 }
 
 // deadlineFor returns the execution budget for a job type. The llm-rank and
@@ -442,9 +620,12 @@ func (o *Orchestrator) Stop() {
 		return
 	}
 	o.closed = true
-	o.mu.Unlock()
+	// Close the queue under the lock, paired with enqueue's send under the lock,
+	// so a chaining send can never race this close.
 	close(o.queue)
-	o.wg.Wait()
+	o.mu.Unlock()
+	o.wg.Wait()       // dispatch workers drain
+	o.awaiters.Wait() // in-flight launches/awaits finish (bounded by the per-job deadline)
 }
 
 func newID() string {

@@ -15,6 +15,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -41,6 +42,11 @@ type RunParams struct {
 	AIEndpoint    string                     // chat-completions URL for the llm-rank ranker
 	AIModel       string                     // ranking model id; empty uses the llm default
 	AIToken       string                     // bearer token for the ranking model; empty falls back to the stub
+	// ReportCompletion makes Run post a terminal completion to ZZ when the job
+	// finishes (docs/adr/0024). The out-of-process runtime (cmd/runtime) sets it
+	// so the orchestrator finalizes the job immediately; the in-process launcher
+	// leaves it false, since its completion is the Launch return.
+	ReportCompletion bool
 }
 
 // Runtime job types. These values are the contract between the orchestrator
@@ -77,6 +83,23 @@ func JobTimeout(jobType string) time.Duration {
 // call it, so the runtime behaves identically regardless of substrate
 // (docs/adr/0012). Dispatch is by job type; the per-type logic is unchanged.
 func Run(ctx context.Context, p RunParams) error {
+	err := dispatch(ctx, p)
+	// When running out-of-process (cmd/runtime), report terminal completion so the
+	// orchestrator finalizes the job the instant the runtime finishes, rather than
+	// waiting to observe the workload terminate (docs/adr/0024). Best-effort: a
+	// failed or absent report is backstopped by the orchestrator's substrate watch.
+	// A fresh context is used so the report still sends after a job-deadline cancel.
+	if p.ReportCompletion && p.BaseURL != "" && p.Token != "" {
+		reportCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if rerr := NewZZClient(p.BaseURL, p.Token, p.Client).ReportCompletion(reportCtx, err); rerr != nil {
+			slog.Default().Warn("runtime completion report failed", "job_type", p.JobType, "err", rerr)
+		}
+		cancel()
+	}
+	return err
+}
+
+func dispatch(ctx context.Context, p RunParams) error {
 	switch p.JobType {
 	case JobEnrich:
 		return runEnrich(ctx, p)

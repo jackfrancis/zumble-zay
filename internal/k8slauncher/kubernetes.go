@@ -47,7 +47,10 @@ type KubernetesJobLauncher struct {
 	pollInterval time.Duration
 }
 
-var _ orchestrator.Launcher = (*KubernetesJobLauncher)(nil)
+var (
+	_ orchestrator.Launcher      = (*KubernetesJobLauncher)(nil)
+	_ orchestrator.AsyncLauncher = (*KubernetesJobLauncher)(nil)
+)
 
 // New builds a KubernetesJobLauncher over the given client.
 func New(client kubernetes.Interface, cfg Config) *KubernetesJobLauncher {
@@ -57,14 +60,33 @@ func New(client kubernetes.Interface, cfg Config) *KubernetesJobLauncher {
 	return &KubernetesJobLauncher{client: client, cfg: cfg, pollInterval: 2 * time.Second}
 }
 
-// Launch creates a Job that runs the runtime image with the injection contract
-// (docs/adr/0012), watches it to completion, and returns a Handle naming the Job.
-func (l *KubernetesJobLauncher) Launch(ctx context.Context, spec orchestrator.JobSpec, token string) (orchestrator.Handle, error) {
+// Dispatch creates a Job that runs the runtime image with the injection contract
+// (docs/adr/0012) and returns a Handle naming it, without waiting for it to
+// finish (docs/adr/0024).
+func (l *KubernetesJobLauncher) Dispatch(ctx context.Context, spec orchestrator.JobSpec, token string) (orchestrator.Handle, error) {
 	created, err := l.client.BatchV1().Jobs(l.cfg.Namespace).Create(ctx, l.jobSpec(spec, token), metav1.CreateOptions{})
 	if err != nil {
 		return orchestrator.Handle{Kind: "k8s-job"}, fmt.Errorf("create job: %w", err)
 	}
-	return orchestrator.Handle{Kind: "k8s-job", Ref: created.Name}, l.waitForCompletion(ctx, created.Name)
+	return orchestrator.Handle{Kind: "k8s-job", Ref: created.Name}, nil
+}
+
+// Await watches the Job named by handle to completion. It keys off the Handle
+// alone, so the orchestrator can call it on its own goroutine without shared
+// launcher state (docs/adr/0024).
+func (l *KubernetesJobLauncher) Await(ctx context.Context, handle orchestrator.Handle) error {
+	return l.waitForCompletion(ctx, handle.Ref)
+}
+
+// Launch creates the Job and watches it to completion, composing Dispatch and
+// Await so a direct blocking call is still available (docs/adr/0009); the
+// orchestrator prefers the split async path (docs/adr/0024).
+func (l *KubernetesJobLauncher) Launch(ctx context.Context, spec orchestrator.JobSpec, token string) (orchestrator.Handle, error) {
+	handle, err := l.Dispatch(ctx, spec, token)
+	if err != nil {
+		return handle, err
+	}
+	return handle, l.Await(ctx, handle)
 }
 
 func (l *KubernetesJobLauncher) jobSpec(spec orchestrator.JobSpec, token string) *batchv1.Job {

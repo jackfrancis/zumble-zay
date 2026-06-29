@@ -27,3 +27,6 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0020](0020-conversation-github-tool-use.md) | Read-only GitHub tool-use in the conversation (file@ref, PR/issue, search) | Accepted |
 | [0021](0021-render-assistant-markdown.md) | Render assistant Markdown to sanitized HTML (goldmark + bluemonday) | Accepted |
 | [0022](0022-discussion-research-axis-reweighting.md) | Discussion-derived "research" re-weighting of the ranking axes (per-axis multipliers) | Accepted |
+| [0023](0023-orchestrator-own-runtime-and-identity.md) | Extract the orchestrator into its own runtime and identity (asymmetric mint, control API) | Accepted |
+| [0024](0024-agent-runtime-portability.md) | Agent-runtime portability: launcher registry, async dispatch, and token exchange | Accepted |
+| [0025](0025-callback-driven-completion.md) | Callback-driven job completion (the runtime reports; the orchestrator races it against the watch) | Accepted |

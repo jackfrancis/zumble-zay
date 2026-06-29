@@ -13,12 +13,10 @@ import (
 	"syscall"
 	"time"
 
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-
 	"github.com/jackfrancis/zumble-zay/internal/agent"
 	"github.com/jackfrancis/zumble-zay/internal/config"
-	"github.com/jackfrancis/zumble-zay/internal/k8slauncher"
+	"github.com/jackfrancis/zumble-zay/internal/controlplane"
+	"github.com/jackfrancis/zumble-zay/internal/mint"
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 	"github.com/jackfrancis/zumble-zay/internal/server"
 )
@@ -33,12 +31,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	launcher, err := selectLauncher(cfg, log)
+	cp, stopControl, err := buildControlClient(cfg, log)
 	if err != nil {
-		log.Error("launcher setup failed", "err", err)
+		log.Error("control plane setup failed", "err", err)
 		os.Exit(1)
 	}
-	handler, cleanup := server.New(cfg, log, launcher)
+	defer stopControl()
+
+	handler, cleanup := server.New(cfg, log, cp)
 	defer cleanup()
 
 	srv := &http.Server{
@@ -81,64 +81,26 @@ func loopbackBaseURL(addr string) string {
 	return "http://" + addr
 }
 
-// selectLauncher builds the agent launcher chosen by cfg.Launcher. The default
-// in-process launcher reaches ZZ over loopback (docs/adr/0007); the k8s-job
-// launcher runs each agent job as a Kubernetes Job (docs/adr/0012). An unknown
-// value is a configuration error: selection is the swap mechanism, so a typo or
-// an unbuilt substrate must fail fast rather than silently run in-process.
-func selectLauncher(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) {
-	switch cfg.Launcher {
-	case "inprocess":
-		log.Info("using in-process launcher")
-		return agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log).
-			WithAI(cfg.AI.Endpoint, cfg.AI.Model, cfg.AI.Token), nil
-	case "k8s-job":
-		cs, err := inClusterClientset()
-		if err != nil {
-			return nil, err
-		}
-		lc := runtimeLauncherConfig(cfg)
-		log.Info("using kubernetes-job launcher", "namespace", lc.Namespace, "image", lc.Image, "zz_base_url", lc.ZZBaseURL)
-		return k8slauncher.New(cs, lc), nil
-	case "k8s-pod":
-		cs, err := inClusterClientset()
-		if err != nil {
-			return nil, err
-		}
-		lc := runtimeLauncherConfig(cfg)
-		log.Info("using kubernetes-pod launcher", "namespace", lc.Namespace, "image", lc.Image, "zz_base_url", lc.ZZBaseURL)
-		return k8slauncher.NewPodLauncher(cs, lc), nil
-	default:
-		return nil, fmt.Errorf("unknown LAUNCHER %q (want inprocess, k8s-job, or k8s-pod)", cfg.Launcher)
+// buildControlClient resolves how the web tier reaches the orchestrator control
+// plane (docs/adr/0023). With CONTROL_PLANE_URL set, the orchestrator runs as
+// its own Deployment and the web tier calls its control API; this binary then
+// holds no Pod-spawning privilege and no Kubernetes client at all. Otherwise the
+// orchestrator is co-located in this process behind the in-process launcher — the
+// single-process default for local dev, tests, and CI. The returned stop drains
+// the co-located orchestrator (a no-op for the remote client).
+func buildControlClient(cfg *config.Config, log *slog.Logger) (controlplane.Client, func(), error) {
+	if cfg.ControlPlaneURL != "" {
+		log.Info("using remote control plane", "url", cfg.ControlPlaneURL)
+		httpClient := &http.Client{Timeout: 10 * time.Second}
+		return controlplane.NewHTTP(cfg.ControlPlaneURL, httpClient, cfg.ControlPlaneToken), func() {}, nil
 	}
-}
-
-// inClusterClientset builds a Kubernetes client from the pod's mounted
-// ServiceAccount. It only works inside a cluster, so it is reached only by the
-// substrate launchers, never the in-process default.
-func inClusterClientset() (*kubernetes.Clientset, error) {
-	restCfg, err := rest.InClusterConfig()
-	if err != nil {
-		return nil, fmt.Errorf("in-cluster config: %w", err)
+	if len(cfg.MintPrivateKey) == 0 {
+		return nil, nil, fmt.Errorf("co-located control plane needs a signing key: set CONTROL_PLANE_URL to use a remote orchestrator, or unset MINT_PUBLIC_KEY")
 	}
-	cs, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		return nil, fmt.Errorf("kubernetes client: %w", err)
-	}
-	return cs, nil
-}
-
-// runtimeLauncherConfig maps the runtime settings onto the substrate launcher
-// config shared by the Job and Pod launchers.
-func runtimeLauncherConfig(cfg *config.Config) k8slauncher.Config {
-	return k8slauncher.Config{
-		Namespace:         cfg.Runtime.Namespace,
-		Image:             cfg.Runtime.Image,
-		ZZBaseURL:         cfg.Runtime.ZZBaseURL,
-		ServiceAccount:    cfg.Runtime.ServiceAccount,
-		AIEndpoint:        cfg.AI.Endpoint,
-		AIModel:           cfg.AI.Model,
-		AITokenSecretName: cfg.AI.TokenSecretName,
-		AITokenSecretKey:  cfg.AI.TokenSecretKey,
-	}
+	log.Info("using co-located control plane (in-process orchestrator)")
+	minter := mint.NewMinter(cfg.MintPrivateKey, 0)
+	launcher := agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log).
+		WithAI(cfg.AI.Endpoint, cfg.AI.Model, cfg.AI.Token)
+	orch := orchestrator.New(minter, launcher, log)
+	return controlplane.NewLocal(orch), orch.Stop, nil
 }

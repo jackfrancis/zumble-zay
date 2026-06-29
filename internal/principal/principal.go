@@ -41,6 +41,10 @@ type Principal struct {
 	// interactive user it equals Subject; for a workload it is the user the
 	// runtime was authorized to act on behalf of.
 	ActingUserID string `json:"acting_user_id"`
+	// JobID ties a workload principal to the orchestrator job it was minted for,
+	// so a runtime's completion report can be correlated back to that job
+	// (docs/adr/0024). Empty for interactive users.
+	JobID string `json:"job_id,omitempty"`
 	// Scopes are the capabilities granted to this principal.
 	Scopes []Scope `json:"scopes"`
 }

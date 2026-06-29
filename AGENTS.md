@@ -24,23 +24,29 @@ writes are **designed but not built**.
 ## Tech & layout
 
 - Go 1.25. Third-party deps: `golang.org/x/oauth2` (auth); `k8s.io/client-go`
-  (the `k8s-job` launcher only — compiled into the **server**, never the agent
-  runtime; see ADR 0012); and `yuin/goldmark` + `microcosm-cc/bluemonday` (render
+  (the `k8s-job`/`k8s-pod` launcher only — compiled into the **orchestrator**,
+  never the web server or the agent runtime; see ADR 0012, 0023); and
+  `yuin/goldmark` + `microcosm-cc/bluemonday` (render
   + sanitize the assistant's Markdown for the UI — server-only, never the runtime;
   see ADR 0021).
 - Module: `github.com/jackfrancis/zumble-zay`.
 
 ```
-cmd/server/          entrypoint (http.Server, graceful shutdown)
+cmd/server/          web tier entrypoint (HTTP, UI, /agent/* sink, control client)
+cmd/orchestrator/    control-plane entrypoint: launcher + minter + control API (ADR 0023)
 internal/config/     env configuration
 internal/session/    server-side sessions over HMAC-signed cookies
 internal/auth/        OAuth provider wiring + login/callback
 internal/authn/      unified auth: RequireAuth/RequireScope; cookie OR bearer
 internal/principal/  Principal{Kind, Subject, ActingUserID, Scopes}
+internal/mint/       Ed25519 job tokens: Minter (orchestrator) + Verifier (web) (ADR 0023)
+internal/controlplane/ web↔orchestrator boundary: Client, Local, HTTP, Handler (ADR 0023); token exchange (ADR 0024)
+internal/launcher/    substrate registry: Register/Build, driver pattern (ADR 0024)
+internal/orchestrator/ co-located/standalone control plane: jobs, mint, launcher seam (sync + async)
 internal/worklist/   WorkItem + ZZ Metadata, Store + Ingestor seams, sort
 internal/api/        JSON HTTP handlers (worklist)
-internal/server/     router + middleware
-deploy/k8s/          kustomize base + dev overlay
+internal/server/     web-tier router + middleware (no launcher, no client-go)
+deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployments)
 ```
 
 ## HTTP endpoints
@@ -83,6 +89,16 @@ deploy/k8s/          kustomize base + dev overlay
   to the cookie session.
 - Bearer/runtime tokens: `Authorization: Bearer` header only (never query
   string), TLS only, short TTL, revocable; store only hashes if opaque.
+- Job tokens are asymmetric (Ed25519, ADR 0023): the **orchestrator** is the
+  sole issuer (private key); the web tier holds only the public key and
+  **verifies** — it must never gain minting ability. The web→orchestrator control
+  API is cluster-internal, bearer-authenticated (`CONTROL_PLANE_TOKEN`),
+  fail-closed, and never exposed through the Ingress. Pod/Job-creation RBAC binds
+  to the orchestrator ServiceAccount only, never the web tier's. The pull
+  token-exchange endpoint (`POST /control/token`, ADR 0024) issues only
+  policy-scoped, single-user, short-TTL job tokens, and authenticates the caller
+  behind the `CallerAuthenticator` seam (shared bearer today; per-service
+  platform OIDC is the hardening).
 - Token vault encrypted at rest (KMS) once persisted. Agents connect to
   providers **directly** with a short-lived credential **vended by ZZ on demand**
   (ADR 0006); ZZ never proxies provider data. ZZ core packages must not import a
@@ -112,6 +128,18 @@ deploy/k8s/          kustomize base + dev overlay
   Default impls are deliberate placeholders.
 - Adding a worklist sort = add a `SortKey` constant + one comparator in
   `internal/worklist/sort.go`.
+- **Adding an agent substrate is additive; the in-cluster baseline must not
+  regress.** The reference launchers (`inprocess`, `k8s-job`, `k8s-pod`,
+  `k8s-pod-detached`) and the runtime contract (`agent.ZZClient` + the `ZZ_*`
+  injection) are the validated in-cluster baseline. A new substrate is a new
+  `orchestrator.Launcher` (optionally `AsyncLauncher`) + a `launcher.Register`
+  from its package init + a blank import in `cmd/orchestrator` — it must not modify
+  the existing launchers. Any change to a shared seam (the `Launcher`/
+  `AsyncLauncher` interfaces, the `ZZClient`/`ZZ_*` contract, the shared
+  `runtimeContainer`/`runtimeEnvVars` helpers, `JobSpec`, or the orchestrator's
+  dispatch/completion path) must be backward-compatible and keep the reference
+  launchers' tests green — identical pipeline output across `inprocess`/`k8s-job`/
+  `k8s-pod` is the regression check (ADR 0012, 0024).
 
 ## Build / dev / test
 
@@ -142,16 +170,34 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    encrypt the vault at rest (lands with persistence, since the vault is
    in-memory today).
 2. Widen GitHub coverage to private repos (`repo` scope) and more signal queries.
-3. Extract the orchestrator into its own runtime + identity once it spawns real
-   workloads or ZZ scales past `replicas: 1`. (ADR 0007)
+3. **DONE — orchestrator extracted into its own runtime + identity (ADR 0023).**
+   `cmd/orchestrator` is a separate Deployment with the Pod/Job-creation RBAC and
+   the Kubernetes client; the web tier sheds both (0 client-go). The web tier
+   reaches it through `controlplane.Client` (co-located `Local` or remote `HTTP`
+   control API). Job tokens are now asymmetric (Ed25519): the orchestrator is the
+   sole issuer, the web tier verifies only. Remaining: move the reconciler to the
+   orchestrator once the store is shared (#5); independent mint keys for true
+   issuer/verifier key separation in production.
 4. ZZ metadata write path beyond ingestion: `PATCH /api/datapoints/{id}/metadata`,
    scope-gated, with provenance and optimistic concurrency.
 5. Cloud persistence behind `worklist.Store`; shared session store; then scale
    `replicas > 1`.
 6. Additional agent substrates behind the `Launcher` seam (ADR 0012 step 7):
    `KueueLauncher` (admission/quota), `SandboxLauncher` (isolation), and
-   `KagentLauncher` (needs a public RFC 8693 token-exchange endpoint first). The
-   swap mechanism is complete; these are additive comparisons.
+   `KagentLauncher`. The plumbing is now in place (ADR 0024): a launcher
+   **registry** (`internal/launcher`, driver pattern — implement `Launcher`,
+   `Register` from a package init, blank-import in `cmd/orchestrator`), **async**
+   dispatch (`AsyncLauncher` Dispatch/Await, so a slow job never pins a worker
+   and completion is decoupled from `Launch` returning), and an RFC 8693-flavored
+   **token-exchange** endpoint (`POST /control/token`) for service runtimes
+   (kagent) that pull a per-job token. The substrate launchers themselves are
+   intentionally additive TODOs; the three existing launchers are the references.
+   Runtimes report terminal completion (`POST /agent/complete`) which the
+   orchestrator races against the launcher watch (ADR 0025), so the k8s launcher
+   is callback-driven with no code change. Remaining: per-service caller identity
+   (platform OIDC) for token exchange. An await-the-deadline launcher
+   (`k8s-pod-detached`) is the in-cluster reference for a fully detached substrate
+   — dispatch + callback-only completion, create-only RBAC, deadline backstop.
 7. **Prompt & context tuning is now the primary correctness lever (ADR 0015).**
    The LLM is authoritative for the four axes, so ranking quality is steered in
    `internal/llm/prompt.go` — sharper axis definitions, the user's priorities and

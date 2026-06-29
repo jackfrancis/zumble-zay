@@ -2,6 +2,7 @@
 package server
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -10,8 +11,8 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/auth"
 	"github.com/jackfrancis/zumble-zay/internal/authn"
 	"github.com/jackfrancis/zumble-zay/internal/config"
+	"github.com/jackfrancis/zumble-zay/internal/controlplane"
 	"github.com/jackfrancis/zumble-zay/internal/mint"
-	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 	"github.com/jackfrancis/zumble-zay/internal/principal"
 	"github.com/jackfrancis/zumble-zay/internal/reconcile"
 	"github.com/jackfrancis/zumble-zay/internal/session"
@@ -20,44 +21,46 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
-// New builds the fully wired HTTP handler for the application. The launcher is
-// the agent-runtime substrate (in-process today); it is injected so ZZ core
-// never imports a provider client (docs/adr/0006). The returned cleanup stops
-// the orchestrator's workers.
-func New(cfg *config.Config, log *slog.Logger, launcher orchestrator.Launcher) (http.Handler, func()) {
-	return newWithDeps(cfg, log, launcher, vault.NewMemoryVault(), worklist.NewMemoryStore())
+// New builds the fully wired HTTP handler for the web tier. The control plane is
+// injected as a controlplane.Client: a co-located orchestrator (single-process)
+// or the remote orchestrator's control API (the split deployment, docs/adr/0023).
+// ZZ core imports no provider client (docs/adr/0006) and no launcher. The
+// returned cleanup stops the staleness reconciler.
+func New(cfg *config.Config, log *slog.Logger, cp controlplane.Client) (http.Handler, func()) {
+	return newWithDeps(cfg, log, cp, vault.NewMemoryVault(), worklist.NewMemoryStore())
 }
 
 // newWithDeps wires the handler over injected dependencies. Tests use it to
 // seed a vault credential and share the store; New supplies in-memory defaults.
-func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Launcher, vlt vault.Vault, store worklist.Store) (http.Handler, func()) {
+func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, vlt vault.Vault, store worklist.Store) (http.Handler, func()) {
 	sessions := session.NewManager(cfg.SessionSecret, cfg.CookieSecure)
 	// The auth handler writes delegated provider tokens to the vault at login;
 	// the credential-vend endpoint reads them for agent runtimes.
 	authH := auth.NewHandler(cfg, sessions, vlt)
-	// Minter issues and validates ZZ job tokens for agent runtimes; it is both
-	// the orchestrator's minter and authn's workload TokenValidator.
-	minter := mint.NewMinter(cfg.SessionSecret, 0)
-	authenticator := authn.New(sessions, minter)
+	// The web tier holds only the job-token verification key: it authenticates a
+	// runtime's bearer but cannot mint one. The orchestrator is the sole issuer
+	// (docs/adr/0023).
+	authenticator := authn.New(sessions, mint.NewVerifier(verifierKey(cfg)))
 
-	// Co-located orchestrator: it implements worklist.Ingestor, so an empty
-	// worklist GET triggers an agentic backfill. It mints job tokens with the
-	// same minter authn validates (docs/adr/0007).
-	orch := orchestrator.New(minter, launcher, log)
-
-	// One store is shared by the read path (GET /api/worklist) and the agent
-	// write path (POST /agent/worklist).
-	worklistHandler := api.NewWorklistHandler(store, orch)
+	// The control plane (a co-located orchestrator or the remote control API)
+	// implements worklist.Ingestor, so an empty worklist GET triggers an agentic
+	// backfill; it also schedules conversation and research jobs. One store is
+	// shared by the read path (GET /api/worklist) and the agent write path
+	// (POST /agent/worklist).
+	worklistHandler := api.NewWorklistHandler(store, cp)
 	credentialHandler := api.NewCredentialHandler(authH)
 	ingestHandler := api.NewIngestHandler(store)
 	// The assistive conversation runs as an ephemeral converse runtime spawned by
 	// the orchestrator (docs/adr/0019); the HTTP layer only enqueues turns. It is
 	// available when a chat model is configured.
 	convEnabled := cfg.AI.Token != ""
-	threadHandler := api.NewThreadHandler(store, orch, convEnabled)
+	threadHandler := api.NewThreadHandler(store, cp, convEnabled)
 	agentThreadHandler := api.NewAgentThreadHandler(store)
 	agentResearchHandler := api.NewAgentResearchHandler(store)
-	webHandler := webui.New(sessions, store, orch, authH, convEnabled)
+	// A runtime reports terminal completion here; the web tier forwards it to the
+	// orchestrator so the job finalizes immediately (docs/adr/0024).
+	completeHandler := api.NewCompleteHandler(cp, log)
+	webHandler := webui.New(sessions, store, cp, authH, convEnabled)
 
 	mux := http.NewServeMux()
 
@@ -121,6 +124,10 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 	// ingest is the runtime's output sink back into ZZ.
 	mux.Handle("POST /agent/credentials/{provider}", authenticator.RequireScope(principal.ScopeSignalsRead, http.HandlerFunc(credentialHandler.Vend)))
 	mux.Handle("POST /agent/worklist", authenticator.RequireScope(principal.ScopeMetadataWrite, http.HandlerFunc(ingestHandler.Ingest)))
+	// Completion report: a runtime tells ZZ its job finished; the web tier forwards
+	// it to the orchestrator (docs/adr/0024). Any authenticated workload may report
+	// its own job (identified by the token's job id), so it needs only signals:read.
+	mux.Handle("POST /agent/complete", authenticator.RequireScope(principal.ScopeSignalsRead, http.HandlerFunc(completeHandler.Complete)))
 	// Converse write-back: a spawned converse runtime posts the assistant's reply
 	// for an item here (docs/adr/0019).
 	mux.Handle("POST /agent/thread", authenticator.RequireScope(principal.ScopeMetadataWrite, http.HandlerFunc(agentThreadHandler.Append)))
@@ -140,20 +147,33 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, launcher orchestrator.Lau
 
 	// Staleness reconciler: when the store can enumerate items, periodically
 	// re-rank those whose discussion-derived research has gone stale, enqueuing
-	// per-item research jobs through the orchestrator (docs/adr/0022). At
-	// replicas:1 it is a single goroutine; leader-gate it past that (ADR 0007).
+	// per-item research jobs through the control plane (docs/adr/0022). It lives in
+	// the web tier because it reads the (in-memory) store; it moves to the
+	// orchestrator once the store is shared (roadmap #5). At replicas:1 it is a
+	// single goroutine; leader-gate it past that (ADR 0007).
 	stopReconcile := func() {}
 	if lister, ok := store.(worklist.Lister); ok {
-		rec := reconcile.New(lister, orch, reconcile.DefaultInterval, log)
+		rec := reconcile.New(lister, cp, reconcile.DefaultInterval, log)
 		rec.Start()
 		stopReconcile = rec.Stop
 	}
 
-	cleanup := func() {
-		stopReconcile()
-		orch.Stop()
-	}
+	// The orchestrator's own lifecycle is owned by the composition root (the
+	// co-located one in cmd/server, or a separate orchestrator process); the web
+	// tier owns only the reconciler it starts here.
+	cleanup := stopReconcile
 	return h, cleanup
+}
+
+// verifierKey returns the Ed25519 public key authn uses to validate job tokens.
+// An explicitly configured key wins; otherwise it is derived from the session
+// secret so a single-process run needs no extra configuration (docs/adr/0023).
+func verifierKey(cfg *config.Config) ed25519.PublicKey {
+	if len(cfg.MintPublicKey) == ed25519.PublicKeySize {
+		return cfg.MintPublicKey
+	}
+	_, pub := mint.KeyPairFromSeed(cfg.SessionSecret)
+	return pub
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

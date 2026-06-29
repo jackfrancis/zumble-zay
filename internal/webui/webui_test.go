@@ -25,7 +25,7 @@ func (f *fakePipeline) EnsureBackfill(context.Context, string) error {
 	f.backfilled = true
 	return nil
 }
-func (f *fakePipeline) Active(string) bool { return f.active }
+func (f *fakePipeline) Active(context.Context, string) (bool, error) { return f.active, nil }
 
 type fakeProviders struct{}
 

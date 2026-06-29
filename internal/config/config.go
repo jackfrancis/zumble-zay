@@ -2,6 +2,9 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -26,6 +29,26 @@ type Config struct {
 	Runtime RuntimeConfig
 	// AI configures the chat-model ranker used by llm-rank jobs (docs/adr/0011).
 	AI AIConfig
+	// MintPrivateKey is the Ed25519 key that signs job tokens. Only the
+	// orchestrator — the sole token issuer (docs/adr/0023) — needs it; it is nil
+	// in a web tier configured with only a public key.
+	MintPrivateKey ed25519.PrivateKey
+	// MintPublicKey verifies job tokens. The web tier holds only this, so it can
+	// authenticate a runtime's token but never mint one. It is always populated
+	// (explicitly, or derived from SessionSecret for single-process runs).
+	MintPublicKey ed25519.PublicKey
+	// ControlPlaneURL is where the web tier reaches the orchestrator's control
+	// API (docs/adr/0023). Empty means the orchestrator is co-located in this
+	// process (the single-process/local default); set it to run the orchestrator
+	// as a separate Deployment.
+	ControlPlaneURL string
+	// ControlPlaneAddr is the address the orchestrator's control API listens on.
+	// It is consumed only by the orchestrator binary.
+	ControlPlaneAddr string
+	// ControlPlaneToken is the shared bearer the web tier presents to the
+	// orchestrator's control API and the orchestrator checks. The control API is
+	// cluster-internal, but it triggers privileged spawns, so it is authenticated.
+	ControlPlaneToken []byte
 }
 
 // AIConfig configures the AxisRanker's chat model. The endpoint speaks the
@@ -75,6 +98,11 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("SESSION_SECRET must be set to at least 32 bytes")
 	}
 
+	mintPriv, mintPub, err := loadMintKeys([]byte(secret))
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Addr:           getEnv("ADDR", ":8080"),
 		BaseURL:        strings.TrimRight(getEnv("BASE_URL", "http://localhost:8080"), "/"),
@@ -110,9 +138,42 @@ func Load() (*Config, error) {
 			TokenSecretName: getEnv("AI_TOKEN_SECRET_NAME", "zumble-zay-secrets"),
 			TokenSecretKey:  getEnv("AI_TOKEN_SECRET_KEY", "AI_TOKEN"),
 		},
+		MintPrivateKey:    mintPriv,
+		MintPublicKey:     mintPub,
+		ControlPlaneURL:   strings.TrimRight(getEnv("CONTROL_PLANE_URL", ""), "/"),
+		ControlPlaneAddr:  getEnv("CONTROL_PLANE_ADDR", ":8090"),
+		ControlPlaneToken: []byte(os.Getenv("CONTROL_PLANE_TOKEN")),
 	}
 
 	return cfg, nil
+}
+
+// loadMintKeys resolves the Ed25519 job-token keypair (docs/adr/0023). An
+// explicit MINT_PRIVATE_KEY makes this process an issuer (orchestrator); an
+// explicit MINT_PUBLIC_KEY makes it verify-only (web tier) with no private key.
+// With neither set, both halves are derived from the session secret so a
+// single-process run works with no extra configuration — the split deployment
+// sets explicit keys, and the verify-only web tier never reaches this branch to
+// re-derive the private key.
+func loadMintKeys(seed []byte) (ed25519.PrivateKey, ed25519.PublicKey, error) {
+	if s := os.Getenv("MINT_PRIVATE_KEY"); s != "" {
+		raw, err := base64.StdEncoding.DecodeString(s)
+		if err != nil || len(raw) != ed25519.PrivateKeySize {
+			return nil, nil, fmt.Errorf("MINT_PRIVATE_KEY must be a base64-encoded %d-byte Ed25519 private key", ed25519.PrivateKeySize)
+		}
+		priv := ed25519.PrivateKey(raw)
+		return priv, priv.Public().(ed25519.PublicKey), nil
+	}
+	if s := os.Getenv("MINT_PUBLIC_KEY"); s != "" {
+		raw, err := base64.StdEncoding.DecodeString(s)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			return nil, nil, fmt.Errorf("MINT_PUBLIC_KEY must be a base64-encoded %d-byte Ed25519 public key", ed25519.PublicKeySize)
+		}
+		return nil, ed25519.PublicKey(raw), nil
+	}
+	h := sha256.Sum256(seed)
+	priv := ed25519.NewKeyFromSeed(h[:])
+	return priv, priv.Public().(ed25519.PublicKey), nil
 }
 
 func getEnv(key, fallback string) string {

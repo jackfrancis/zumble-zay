@@ -114,6 +114,40 @@ func (c *ZZClient) Ingest(ctx context.Context, items []worklist.WorkItem) error 
 	return nil
 }
 
+// ReportCompletion performs the optional third call of the contract: POST
+// /agent/complete, telling ZZ the job finished and whether it failed. The
+// orchestrator finalizes the job the instant this lands, rather than waiting to
+// observe the workload terminate (docs/adr/0024). It is best-effort: if it does
+// not arrive, the orchestrator's substrate watch backstops completion.
+func (c *ZZClient) ReportCompletion(ctx context.Context, jobErr error) error {
+	payload := map[string]string{}
+	if jobErr != nil {
+		payload["error"] = jobErr.Error()
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	u := c.baseURL + "/agent/complete"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // ListWorklist performs the read side of the contract: GET /agent/worklist,
 // returning the acting user's persisted work items so a runtime can augment
 // them in place rather than re-deriving them from the provider (docs/adr/0010).

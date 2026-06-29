@@ -14,16 +14,21 @@ data:
   COOKIE_SECURE: "true"
   MICROSOFT_TENANT: "common"
   # Agent-runtime substrate: how the orchestrator launches agent jobs. The swap
-  # is config-only (ADR 0012). "k8s-job" runs each agent job as a Kubernetes Job
+  # is config-only (ADR 0012). Consumed by the ORCHESTRATOR Deployment, not the
+  # web tier (docs/adr/0023). "k8s-job" runs each agent job as a Kubernetes Job
   # (the deployed default — Kubernetes is the substrate; requires the launcher
   # RBAC and the runtime image). "k8s-pod" runs each as a bare Pod (no
-  # retry/backoff or TTL GC — a lifecycle contrast). "inprocess" runs jobs in
-  # the server process and is the code-level default for non-cluster runs
+  # retry/backoff or TTL GC — a lifecycle contrast). "k8s-pod-detached" runs each
+  # as a bare Pod but does NOT watch it: completion comes solely from the
+  # runtime's callback (ADR 0025), so it needs only Pod-create RBAC — the
+  # in-cluster reference for a fully detached substrate. "inprocess" runs jobs in
+  # the orchestrator process and is the code-level default for non-cluster runs
   # (local, tests, CI). An unknown value fails fast at startup.
   LAUNCHER: "k8s-job"
-  # Out-of-process runtime settings, used only when LAUNCHER=k8s-job. These have
-  # code defaults; override per environment. RUNTIME_SERVICE_ACCOUNT is optional
-  # (the runtime only needs HTTP egress to ZZ, not the Kubernetes API).
+  # Out-of-process runtime settings, used by the orchestrator when LAUNCHER is
+  # k8s-job or k8s-pod. These have code defaults; override per environment.
+  # RUNTIME_SERVICE_ACCOUNT is optional (the runtime only needs HTTP egress to
+  # the web tier, not the Kubernetes API).
   # RUNTIME_IMAGE: "localhost/zumble-zay-runtime:dev"
   # RUNTIME_NAMESPACE: "zumble-zay"
   # RUNTIME_ZZ_BASE_URL: "http://zumble-zay:8080"

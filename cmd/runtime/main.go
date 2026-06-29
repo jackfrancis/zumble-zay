@@ -22,6 +22,10 @@ func main() {
 		log.Error("invalid runtime configuration", "err", err)
 		os.Exit(2)
 	}
+	// This binary is the out-of-process runtime, so it reports terminal completion
+	// back to ZZ: the orchestrator finalizes the job the instant we finish rather
+	// than waiting to watch the workload terminate (docs/adr/0024).
+	p.ReportCompletion = true
 
 	log.Info("runtime starting", "job_type", p.JobType, "provider", p.Provider, "base_url", p.BaseURL)
 

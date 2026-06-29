@@ -1,0 +1,19 @@
+# Cluster-internal Service for the orchestrator control API (docs/adr/0023). The
+# web tier dials this at http://zumble-zay-orchestrator:8090. ClusterIP only:
+# the control plane is never exposed through the Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: zumble-zay-orchestrator
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: orchestrator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: orchestrator
+  ports:
+    - name: control
+      port: 8090
+      targetPort: control

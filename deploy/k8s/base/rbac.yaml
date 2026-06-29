@@ -1,7 +1,8 @@
-# The orchestrator (running in the server pod) creates and watches runtime
-# workloads when LAUNCHER=k8s-job or k8s-pod (docs/adr/0012). Least privilege:
-# namespaced, jobs plus pods (create/watch/delete the runtime workloads, read
-# their logs), nothing cluster-wide.
+# The orchestrator (its own Deployment, docs/adr/0023) creates and watches
+# runtime workloads when LAUNCHER=k8s-job or k8s-pod (docs/adr/0012). Least
+# privilege: namespaced, jobs plus pods (create/watch/delete the runtime
+# workloads, read their logs), nothing cluster-wide. The binding targets the
+# orchestrator ServiceAccount, so the internet-facing web tier holds none of it.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -27,4 +28,4 @@ roleRef:
   name: zumble-zay-launcher
 subjects:
   - kind: ServiceAccount
-    name: zumble-zay
+    name: zumble-zay-orchestrator

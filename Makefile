@@ -1,6 +1,7 @@
 .PHONY: build run test tidy vet fmt clean image image-save kind-load engine \
-        cluster-up cluster-down dev-up dev-down dev-forward dev-logs \
-        build-runtime image-runtime image-runtime-save kind-load-runtime vendor-primer
+        cluster-up cluster-down dev-up dev-down dev-forward dev-logs dev-logs-orchestrator \
+        build-runtime image-runtime image-runtime-save kind-load-runtime \
+        build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer
 
 BIN := bin/server
 
@@ -16,6 +17,11 @@ IMAGE ?= localhost/zumble-zay:dev
 # in-process, built as a binary/image so it can run as an out-of-process workload.
 RUNTIME_BIN := bin/runtime
 RUNTIME_IMAGE ?= localhost/zumble-zay-runtime:dev
+
+# Orchestrator control-plane artifact (docs/adr/0023): the agent control plane,
+# extracted from the web tier so Pod/Job-creation privilege lives only here.
+ORCHESTRATOR_BIN := bin/orchestrator
+ORCHESTRATOR_IMAGE ?= localhost/zumble-zay-orchestrator:dev
 
 # Vendored GitHub Primer CSS (the UI's design system, served from the binary).
 # `make vendor-primer` refreshes these at the pinned versions; bump the versions
@@ -39,6 +45,10 @@ build:
 build-runtime:
 	go build -o $(RUNTIME_BIN) ./cmd/runtime
 
+# Build the orchestrator control-plane binary (docs/adr/0023).
+build-orchestrator:
+	go build -o $(ORCHESTRATOR_BIN) ./cmd/orchestrator
+
 run:
 	go run ./cmd/server
 
@@ -55,7 +65,7 @@ fmt:
 	gofmt -l -w .
 
 clean:
-	rm -rf bin zumble-zay-image.tar zumble-zay-runtime-image.tar
+	rm -rf bin zumble-zay-image.tar zumble-zay-runtime-image.tar zumble-zay-orchestrator-image.tar
 
 # Refresh the vendored GitHub Primer CSS at the pinned versions (the UI's design
 # system). Re-run after bumping PRIMER_*_VERSION to scoop in updates.
@@ -86,6 +96,10 @@ image: engine
 image-runtime: engine
 	$(CONTAINER_ENGINE) build -f Dockerfile.runtime -t $(RUNTIME_IMAGE) .
 
+# Build the orchestrator control-plane image (docs/adr/0023).
+image-orchestrator: engine
+	$(CONTAINER_ENGINE) build -f Dockerfile.orchestrator -t $(ORCHESTRATOR_IMAGE) .
+
 # Export the image to a portable archive (works with docker and podman).
 image-save: image
 	$(CONTAINER_ENGINE) save $(IMAGE) -o zumble-zay-image.tar
@@ -107,6 +121,16 @@ kind-load-runtime: image-runtime-save
 	kind load image-archive zumble-zay-runtime-image.tar --name $(KIND_CLUSTER)
 	rm -f zumble-zay-runtime-image.tar
 
+# Export the orchestrator image to a portable archive (docs/adr/0023).
+image-orchestrator-save: image-orchestrator
+	$(CONTAINER_ENGINE) save $(ORCHESTRATOR_IMAGE) -o zumble-zay-orchestrator-image.tar
+
+# Load the orchestrator control-plane image into kind (same engine-agnostic
+# archive path as kind-load).
+kind-load-orchestrator: image-orchestrator-save
+	kind load image-archive zumble-zay-orchestrator-image.tar --name $(KIND_CLUSTER)
+	rm -f zumble-zay-orchestrator-image.tar
+
 # Create the kind cluster if it does not already exist.
 cluster-up:
 	@command -v kind >/dev/null || { echo "kind not installed (https://kind.sigs.k8s.io)"; exit 1; }
@@ -116,23 +140,26 @@ cluster-up:
 cluster-down:
 	-kind delete cluster --name $(KIND_CLUSTER)
 
-# One shot: build the image from the current source, stand up a kind cluster,
-# load the image, deploy the dev overlay, and wait until the app is ready. The
-# runtime image is loaded too because the deployed default LAUNCHER is k8s-job,
-# which runs agent jobs from that image (ADR 0012).
-dev-up: cluster-up kind-load kind-load-runtime
+# One shot: build the images from the current source, stand up a kind cluster,
+# load them, deploy the dev overlay, and wait until both tiers are ready. Three
+# images are loaded: the web tier, the orchestrator control plane (docs/adr/0023),
+# and the runtime — the deployed default LAUNCHER is k8s-job, so the orchestrator
+# runs agent jobs from the runtime image (ADR 0012).
+dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	@kubectl create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl apply -f -
 	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets >/dev/null 2>&1 || \
 		kubectl -n $(KUBE_NS) create secret generic zumble-zay-secrets \
-			--from-literal=SESSION_SECRET="$$(openssl rand -base64 48)"
+			--from-literal=SESSION_SECRET="$$(openssl rand -base64 48)" \
+			--from-literal=CONTROL_PLANE_TOKEN="$$(openssl rand -base64 48)"
 	kubectl apply -k deploy/k8s/overlays/dev
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is
 	# created, leaving the old code running. kind-load already replaced the image
 	# on the node, so force a rollout to adopt it. (Agent Jobs need no equivalent:
 	# each is a fresh pod that pulls IfNotPresent from the reloaded node image.)
-	kubectl -n $(KUBE_NS) rollout restart deploy/zumble-zay
+	kubectl -n $(KUBE_NS) rollout restart deploy/zumble-zay deploy/zumble-zay-orchestrator
 	kubectl -n $(KUBE_NS) rollout status deploy/zumble-zay --timeout=120s
+	kubectl -n $(KUBE_NS) rollout status deploy/zumble-zay-orchestrator --timeout=120s
 	@echo
 	@echo "zumble-zay is running. Expose it with:  make dev-forward"
 	@echo "then:  curl localhost:8080/healthz"
@@ -144,6 +171,10 @@ dev-down: cluster-down
 dev-forward:
 	kubectl -n $(KUBE_NS) port-forward deploy/zumble-zay 8080:8080
 
-# Tail the application logs.
+# Tail the web tier logs.
 dev-logs:
 	kubectl -n $(KUBE_NS) logs -f deploy/zumble-zay
+
+# Tail the orchestrator control-plane logs (docs/adr/0023).
+dev-logs-orchestrator:
+	kubectl -n $(KUBE_NS) logs -f deploy/zumble-zay-orchestrator

@@ -16,11 +16,25 @@ import (
 
 	"github.com/jackfrancis/zumble-zay/internal/agent"
 	"github.com/jackfrancis/zumble-zay/internal/config"
+	"github.com/jackfrancis/zumble-zay/internal/controlplane"
 	"github.com/jackfrancis/zumble-zay/internal/mint"
+	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 	"github.com/jackfrancis/zumble-zay/internal/principal"
 	"github.com/jackfrancis/zumble-zay/internal/vault"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
+
+// newLocalControl builds a co-located control plane over the in-process
+// launcher — the wiring cmd/server uses for single-process runs (docs/adr/0023).
+// It returns the control client and a stop for the orchestrator's workers. A nil
+// launcher uses the NoopLauncher (for tests that drive agent.Run directly).
+func newLocalControl(secret []byte, launcher orchestrator.Launcher, log *slog.Logger) (*controlplane.Local, func()) {
+	if launcher == nil {
+		launcher = orchestrator.NoopLauncher{}
+	}
+	orch := orchestrator.New(mint.NewMinterFromSeed(secret, 0), launcher, log)
+	return controlplane.NewLocal(orch), orch.Stop
+}
 
 // githubSearchBody is the stub /search/issues response: two open PRs in one
 // repo. Returned for every query, so the agent's three signal queries dedupe to
@@ -88,7 +102,9 @@ func TestAgenticBackfillEndToEnd(t *testing.T) {
 	}
 	store := worklist.NewMemoryStore()
 
-	handler, cleanup := newWithDeps(cfg, log, launcher, vlt, store)
+	cp, stopOrch := newLocalControl(secret, launcher, log)
+	defer stopOrch()
+	handler, cleanup := newWithDeps(cfg, log, cp, vlt, store)
 	defer cleanup()
 
 	ts := httptest.NewUnstartedServer(handler)
@@ -98,7 +114,7 @@ func TestAgenticBackfillEndToEnd(t *testing.T) {
 	defer ts.Close()
 
 	// A workload bearer scoped to the user, used only to trigger the read path.
-	m := mint.NewMinter(secret, time.Minute)
+	m := mint.NewMinterFromSeed(secret, time.Minute)
 	bearer, err := m.Mint(mint.Claims{
 		Subject:      "test-trigger",
 		ActingUserID: user,
@@ -244,7 +260,9 @@ func TestConverseTurnEndToEnd(t *testing.T) {
 		GitHub: worklist.GitHubRef{Repo: "octo/repo", Number: 1, Title: "Fix the bug"},
 	})
 
-	handler, cleanup := newWithDeps(cfg, log, launcher, vlt, store)
+	cp, stopOrch := newLocalControl(secret, launcher, log)
+	defer stopOrch()
+	handler, cleanup := newWithDeps(cfg, log, cp, vlt, store)
 	defer cleanup()
 
 	ts := httptest.NewUnstartedServer(handler)
@@ -253,7 +271,7 @@ func TestConverseTurnEndToEnd(t *testing.T) {
 	ts.Start()
 	defer ts.Close()
 
-	m := mint.NewMinter(secret, time.Minute)
+	m := mint.NewMinterFromSeed(secret, time.Minute)
 	bearer, err := m.Mint(mint.Claims{
 		Subject: "test-trigger", ActingUserID: user,
 		Scopes: []principal.Scope{principal.ScopeSignalsRead}, JobID: "trigger", Provider: "github",
@@ -371,12 +389,14 @@ func TestResearchAgentReweightsItem(t *testing.T) {
 		},
 	})
 
-	handler, cleanup := newWithDeps(cfg, log, nil, vlt, store)
+	cp, stopOrch := newLocalControl(secret, nil, log)
+	defer stopOrch()
+	handler, cleanup := newWithDeps(cfg, log, cp, vlt, store)
 	defer cleanup()
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	m := mint.NewMinter(secret, time.Minute)
+	m := mint.NewMinterFromSeed(secret, time.Minute)
 	jobToken, err := m.Mint(mint.Claims{
 		Subject: "runtime-r1", ActingUserID: user,
 		Scopes: []principal.Scope{principal.ScopeSignalsRead, principal.ScopeMetadataWrite}, JobID: "r1",

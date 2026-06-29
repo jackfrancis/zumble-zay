@@ -30,3 +30,6 @@ images:
   - name: zumble-zay
     newName: localhost/zumble-zay
     newTag: dev
+  - name: zumble-zay-orchestrator
+    newName: localhost/zumble-zay-orchestrator
+    newTag: dev

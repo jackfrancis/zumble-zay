@@ -1,0 +1,25 @@
+# Orchestrator control-plane image (docs/adr/0023). The orchestrator is extracted
+# from the web tier so that Pod/Job-creation privilege and the Kubernetes client
+# live only here. Mirrors the server Dockerfile; builds identically under docker
+# and podman (no BuildKit-only features).
+
+# ---- build stage ----
+FROM golang:1.25 AS build
+WORKDIR /src
+
+# Cache dependencies first.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Build a static, stripped binary.
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/orchestrator ./cmd/orchestrator
+
+# ---- runtime stage ----
+# distroless static: no shell, non-root by default, ships CA certs for the
+# in-cluster Kubernetes API calls. The control API listens on 8090.
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/orchestrator /orchestrator
+EXPOSE 8090
+USER nonroot:nonroot
+ENTRYPOINT ["/orchestrator"]

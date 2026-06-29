@@ -2,6 +2,7 @@ package k8slauncher
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -98,6 +99,34 @@ func TestPodLaunchReportsFailure(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Launch did not return after the Pod failed")
+	}
+}
+
+func TestDetachedPodLauncherDispatchesWithoutWatching(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	l := NewDetachedPodLauncher(cs, Config{Namespace: "zz", Image: "img", ZZBaseURL: "http://zz:8080"})
+
+	h, err := l.Dispatch(context.Background(),
+		orchestrator.JobSpec{JobID: "j1", Type: "github-ingest", Provider: "github", ActingUserID: "github:1"}, "tok")
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if h.Kind != "k8s-pod-detached" {
+		t.Fatalf("handle kind = %q, want k8s-pod-detached", h.Kind)
+	}
+	// Dispatch created the Pod (the fake clientset does not populate GenerateName,
+	// so verify via List rather than the returned name).
+	if pods, _ := cs.CoreV1().Pods("zz").List(context.Background(), metav1.ListOptions{}); len(pods.Items) != 1 {
+		t.Fatalf("expected one Pod created, got %d", len(pods.Items))
+	}
+
+	// Await does not watch the Pod: the fake Pod never reaches a terminal phase,
+	// yet Await returns at the deadline rather than polling forever — completion
+	// would otherwise arrive via the runtime's callback (docs/adr/0025).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := l.Await(ctx, h); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Await = %v, want context.DeadlineExceeded", err)
 	}
 }
 

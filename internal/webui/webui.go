@@ -38,10 +38,12 @@ type Providers interface {
 
 // Pipeline triggers a user's backfill and reports whether one is still running.
 // The worklist view auto-refreshes while a pass is active so enrich/llm-rank
-// updates appear without a manual refresh, then stops once it settles.
+// updates appear without a manual refresh, then stops once it settles. Active
+// can be a network call to the control plane (docs/adr/0023), so it takes a
+// context and may fail.
 type Pipeline interface {
 	EnsureBackfill(ctx context.Context, ownerID string) error
-	Active(ownerID string) bool
+	Active(ctx context.Context, ownerID string) (bool, error)
 }
 
 // Handler renders the landing page and serves its static assets.
@@ -107,8 +109,13 @@ func (h *Handler) view(r *http.Request) (pageData, int) {
 	}
 
 	// A pass is running: keep showing processing and polling until it completes,
-	// rather than rendering an intermediate (e.g. only-ingested) list.
-	if h.pipeline.Active(user.ID) {
+	// rather than rendering an intermediate (e.g. only-ingested) list. A control
+	// plane that cannot be reached surfaces as the error view.
+	active, err := h.pipeline.Active(r.Context(), user.ID)
+	if err != nil {
+		return pageData{View: "error", User: user}, http.StatusBadGateway
+	}
+	if active {
 		return pageData{View: "processing", User: user, RefreshSecs: 3}, http.StatusOK
 	}
 

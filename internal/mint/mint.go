@@ -4,16 +4,18 @@
 // user, the granted scopes, and an expiry — so ZZ authorizes a request from the
 // token alone.
 //
-// The token is a compact HMAC-SHA256-signed envelope (base64url(claims).sig),
-// implemented with the standard library so ZZ takes on no JWT dependency while
-// it both mints and validates. A move to asymmetric signing keys, so other
-// parties can verify without the secret, is a later step.
+// The token is a compact Ed25519-signed envelope (base64url(claims).base64url(sig)),
+// implemented with the standard library so ZZ takes on no JWT dependency. Signing
+// is asymmetric so the issuer and the verifier are separate roles (docs/adr/0023):
+// the orchestrator holds the private key and is the sole issuer (Minter); the
+// internet-facing web tier holds only the public key and can verify a runtime's
+// token but never mint one (Verifier).
 package mint
 
 import (
-	"crypto/hmac"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -47,26 +49,38 @@ type Claims struct {
 	ExpiresAt    int64             `json:"exp"`
 }
 
-// Minter mints and validates job tokens with a single HMAC key. The same
-// instance is the orchestrator's minter and authn's TokenValidator.
+// Minter signs job tokens with an Ed25519 private key. It is the sole issuer of
+// job tokens; only the orchestrator — the authorization server (docs/adr/0001,
+// 0023) — holds one. Verification is a separate role (Verifier).
 type Minter struct {
-	key []byte
+	key ed25519.PrivateKey
 	ttl time.Duration
 	now func() time.Time
 }
 
-// NewMinter returns a Minter. The signing key is domain-separated from the
-// supplied secret so a job token can never be confused with another artifact
-// (e.g. a session cookie) signed by the same secret. ttl <= 0 uses the default.
-func NewMinter(secret []byte, ttl time.Duration) *Minter {
+// NewMinter returns a Minter over an Ed25519 private key. ttl <= 0 uses the
+// default.
+func NewMinter(key ed25519.PrivateKey, ttl time.Duration) *Minter {
 	if ttl <= 0 {
 		ttl = defaultTTL
 	}
-	return &Minter{key: deriveKey(secret), ttl: ttl, now: time.Now}
+	return &Minter{key: key, ttl: ttl, now: time.Now}
+}
+
+// NewMinterFromSeed derives the Ed25519 signing key deterministically from seed.
+// It is a convenience for single-process and test wiring, where one process
+// holds both halves of the keypair; a split deployment supplies an explicit
+// private key instead (docs/adr/0023).
+func NewMinterFromSeed(seed []byte, ttl time.Duration) *Minter {
+	priv, _ := KeyPairFromSeed(seed)
+	return NewMinter(priv, ttl)
 }
 
 // Mint signs c into a token, stamping the issue and expiry times.
 func (m *Minter) Mint(c Claims) (string, error) {
+	if len(m.key) != ed25519.PrivateKeySize {
+		return "", ErrInvalidToken
+	}
 	now := m.now()
 	c.IssuedAt = now.Unix()
 	c.ExpiresAt = now.Add(m.ttl).Unix()
@@ -76,16 +90,48 @@ func (m *Minter) Mint(c Claims) (string, error) {
 		return "", err
 	}
 	b := base64.RawURLEncoding.EncodeToString(payload)
-	return b + "." + m.sign(b), nil
+	sig := ed25519.Sign(m.key, []byte(b))
+	return b + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// Public returns the verification key matching this minter's private key.
+func (m *Minter) Public() ed25519.PublicKey {
+	return m.key.Public().(ed25519.PublicKey)
+}
+
+// TTL returns how long a minted token is valid, for an exchange response's
+// expires_in (docs/adr/0024).
+func (m *Minter) TTL() time.Duration {
+	return m.ttl
+}
+
+// Verifier returns a Verifier for this minter's public key. It is a convenience
+// for single-process and test wiring; a split deployment builds the Verifier
+// from the separately distributed public key instead (docs/adr/0023).
+func (m *Minter) Verifier() *Verifier {
+	return NewVerifier(m.Public())
+}
+
+// Verifier validates job tokens with an Ed25519 public key. The web tier holds
+// only this: it can authenticate a runtime's bearer token but cannot issue one.
+type Verifier struct {
+	key ed25519.PublicKey
+	now func() time.Time
+}
+
+// NewVerifier returns a Verifier over an Ed25519 public key.
+func NewVerifier(key ed25519.PublicKey) *Verifier {
+	return &Verifier{key: key, now: time.Now}
 }
 
 // Verify checks the signature and expiry and returns the decoded claims.
-func (m *Minter) Verify(token string) (*Claims, error) {
-	b, sig, ok := strings.Cut(token, ".")
-	if !ok || b == "" || sig == "" {
+func (v *Verifier) Verify(token string) (*Claims, error) {
+	b, sigPart, ok := strings.Cut(token, ".")
+	if !ok || b == "" || sigPart == "" {
 		return nil, ErrInvalidToken
 	}
-	if subtle.ConstantTimeCompare([]byte(sig), []byte(m.sign(b))) != 1 {
+	sig, err := base64.RawURLEncoding.DecodeString(sigPart)
+	if err != nil || len(v.key) != ed25519.PublicKeySize || !ed25519.Verify(v.key, []byte(b), sig) {
 		return nil, ErrInvalidToken
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(b)
@@ -96,7 +142,7 @@ func (m *Minter) Verify(token string) (*Claims, error) {
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return nil, ErrInvalidToken
 	}
-	if m.now().After(time.Unix(c.ExpiresAt, 0)) {
+	if v.now().After(time.Unix(c.ExpiresAt, 0)) {
 		return nil, ErrExpired
 	}
 	return &c, nil
@@ -105,8 +151,8 @@ func (m *Minter) Verify(token string) (*Claims, error) {
 // Validate implements authn.TokenValidator: it verifies a bearer token and maps
 // its claims onto a workload Principal. The request is unused today; binding a
 // token to request properties can be added without changing callers.
-func (m *Minter) Validate(_ *http.Request, token string) (*principal.Principal, error) {
-	c, err := m.Verify(token)
+func (v *Verifier) Validate(_ *http.Request, token string) (*principal.Principal, error) {
+	c, err := v.Verify(token)
 	if err != nil {
 		return nil, err
 	}
@@ -114,20 +160,27 @@ func (m *Minter) Validate(_ *http.Request, token string) (*principal.Principal, 
 		Kind:         principal.KindWorkload,
 		Subject:      c.Subject,
 		ActingUserID: c.ActingUserID,
+		JobID:        c.JobID,
 		Scopes:       c.Scopes,
 	}, nil
 }
 
-func (m *Minter) sign(b string) string {
-	mac := hmac.New(sha256.New, m.key)
-	mac.Write([]byte(b))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+// GenerateKeyPair returns a fresh random Ed25519 keypair, for an operator to
+// provision the orchestrator's private key and the web tier's public key.
+func GenerateKeyPair() (ed25519.PrivateKey, ed25519.PublicKey, error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	return priv, pub, nil
 }
 
-// deriveKey separates the job-token signing key from the raw secret so the same
-// secret signing other artifacts cannot produce a colliding signature.
-func deriveKey(secret []byte) []byte {
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte("zz/job-token/v1"))
-	return mac.Sum(nil)
+// KeyPairFromSeed deterministically derives an Ed25519 keypair from seed (hashed
+// to the 32-byte seed Ed25519 expects). The single-process and test wiring use
+// it so the in-process minter and verifier agree with no extra configuration; a
+// split deployment provisions an independent keypair instead (docs/adr/0023).
+func KeyPairFromSeed(seed []byte) (ed25519.PrivateKey, ed25519.PublicKey) {
+	h := sha256.Sum256(seed)
+	priv := ed25519.NewKeyFromSeed(h[:])
+	return priv, priv.Public().(ed25519.PublicKey)
 }

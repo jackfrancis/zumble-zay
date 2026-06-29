@@ -1,26 +1,30 @@
+# Orchestrator control plane (docs/adr/0007, 0023). Its own Deployment, identity,
+# and RBAC: this is the only workload that creates runtime Pods/Jobs, and it is
+# not internet-facing (no Ingress, ClusterIP only). The web tier reaches its
+# control API over the cluster network.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: zumble-zay
+  name: zumble-zay-orchestrator
   labels:
     app.kubernetes.io/name: zumble-zay
-    app.kubernetes.io/component: backend
+    app.kubernetes.io/component: orchestrator
 spec:
-  # Sessions and the worklist are in-memory today, so a cookie/session lives in
-  # a single pod. Keep replicas at 1 until a shared session store and the cloud
-  # worklist store land; then this can scale out (and add an HPA).
+  # The orchestrator holds in-memory job state and a worker pool, and a single
+  # leader is wanted for the staleness reconciler's future move here (ADR 0007).
+  # Keep at 1 until that state is shared and leader election lands.
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: zumble-zay
-      app.kubernetes.io/component: backend
+      app.kubernetes.io/component: orchestrator
   template:
     metadata:
       labels:
         app.kubernetes.io/name: zumble-zay
-        app.kubernetes.io/component: backend
+        app.kubernetes.io/component: orchestrator
     spec:
-      serviceAccountName: zumble-zay
+      serviceAccountName: zumble-zay-orchestrator
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -29,35 +33,31 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: server
-          image: zumble-zay:latest
+        - name: orchestrator
+          image: zumble-zay-orchestrator:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - name: http
-              containerPort: 8080
+            - name: control
+              containerPort: 8090
           envFrom:
+            # Shares the config (LAUNCHER, RUNTIME_*, AI_*) and the Secret
+            # (SESSION_SECRET, CONTROL_PLANE_TOKEN, AI_TOKEN, and in a hardened
+            # deployment MINT_PRIVATE_KEY). It ignores web-only keys it does not
+            # read (e.g. CONTROL_PLANE_URL is set only on the web Deployment).
             - configMapRef:
                 name: zumble-zay-config
             - secretRef:
                 name: zumble-zay-secrets
-          env:
-            # The orchestrator runs as a separate Deployment with its own identity
-            # and the Pod-spawning RBAC (docs/adr/0023). Setting this routes the
-            # web tier's control calls (ingest/converse/research/active) to that
-            # process instead of a co-located orchestrator. The web tier holds no
-            # launcher RBAC and no Kubernetes client.
-            - name: CONTROL_PLANE_URL
-              value: http://zumble-zay-orchestrator:8090
           readinessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: control
             initialDelaySeconds: 2
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: control
             initialDelaySeconds: 5
             periodSeconds: 20
           resources:

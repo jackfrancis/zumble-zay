@@ -12,6 +12,8 @@ resources:
   - configmap.yaml
   - deployment.yaml
   - service.yaml
+  - orchestrator-deployment.yaml
+  - orchestrator-service.yaml
   - ingress.yaml
 
 labels:
