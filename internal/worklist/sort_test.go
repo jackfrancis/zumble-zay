@@ -94,6 +94,49 @@ func TestSortTieBreakByUpdated(t *testing.T) {
 	}
 }
 
+func TestSortFloatsUnreadRepliesToTop(t *testing.T) {
+	now := time.Now()
+	// unread: an agent reply newer than ThreadReadAt (zero) is unread.
+	unread := func(id string, rank float64) WorkItem {
+		it := item(id, rank, PriorityNone, now)
+		it.Thread = []Message{{Role: RoleAgent, Content: "reply", At: now}}
+		return it
+	}
+	// read: the same reply, but read after it arrived.
+	read := func(id string, rank float64) WorkItem {
+		it := unread(id, rank)
+		it.ThreadReadAt = now.Add(time.Minute)
+		return it
+	}
+	mk := func() []WorkItem {
+		return []WorkItem{
+			read("hi-read", 0.9),
+			unread("lo-unread", 0.1),
+			read("lo-read", 0.2),
+			unread("hi-unread", 0.8),
+		}
+	}
+
+	// desc: low-rank unread still outranks high-rank read; within each group the
+	// normal rank order applies.
+	desc := mk()
+	if err := Sort(desc, SortRank, true); err != nil {
+		t.Fatalf("Sort desc: %v", err)
+	}
+	if got := ids(desc); !equal(got, []string{"hi-unread", "lo-unread", "hi-read", "lo-read"}) {
+		t.Fatalf("unread-first desc order = %v, want [hi-unread lo-unread hi-read lo-read]", got)
+	}
+
+	// asc: direction flips the within-group order, but unread stays on top.
+	asc := mk()
+	if err := Sort(asc, SortRank, false); err != nil {
+		t.Fatalf("Sort asc: %v", err)
+	}
+	if got := ids(asc); !equal(got, []string{"lo-unread", "hi-unread", "lo-read", "hi-read"}) {
+		t.Fatalf("unread-first asc order = %v, want [lo-unread hi-unread lo-read hi-read]", got)
+	}
+}
+
 func TestSortUnknownKey(t *testing.T) {
 	if err := Sort(nil, SortKey("bogus"), true); err != ErrUnknownSort {
 		t.Fatalf("expected ErrUnknownSort, got %v", err)

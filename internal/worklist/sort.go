@@ -73,12 +73,23 @@ func priorityWeight(p Priority) int {
 // Sort orders items in place by key. desc=true puts the highest value first
 // (the natural "most important first" ordering). Ties break by most-recently
 // updated, then by ID, for a stable, deterministic result.
+//
+// Items with an unread agent reply float to the very top of every sort,
+// regardless of key or direction: a pending response the user has not seen
+// outranks the chosen ordering (docs/adr/0018). The requested ordering still
+// applies within the unread group and within the rest.
 func Sort(items []WorkItem, key SortKey, desc bool) error {
 	cmpFn, ok := comparators[key]
 	if !ok {
 		return ErrUnknownSort
 	}
 	slices.SortStableFunc(items, func(a, b WorkItem) int {
+		if ua, ub := a.HasUnreadReply(), b.HasUnreadReply(); ua != ub {
+			if ua {
+				return -1 // a has an unread reply; it sorts before b
+			}
+			return 1
+		}
 		c := cmpFn(a, b)
 		if desc {
 			c = -c
