@@ -1,0 +1,56 @@
+# A small standing RayCluster for the ray/kuberay substrate (docs/adr/0028).
+#
+# The ray launcher submits each agent job as a RayJob with
+# spec.clusterSelector[ray.io/cluster]=zz-ray, so this cluster's name and label
+# must match RAY_CLUSTER on the orchestrator. Sized for a local kind cluster.
+#
+# Note the head/worker image: to actually EXECUTE jobs (entrypoint /runtime), the
+# image must contain the zumble-zay runtime binary — use the bundled image built
+# by `deploy/ray/Dockerfile.ray` (localhost/zz-ray:dev), not stock rayproject/ray
+# (which has python+ray but not /runtime). Stock image is fine to merely stand the
+# cluster up.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: zz-ray
+  namespace: zumble-zay
+  labels:
+    ray.io/cluster: zz-ray
+spec:
+  rayVersion: "2.9.0"
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+    template:
+      spec:
+        containers:
+          - name: ray-head
+            image: localhost/zz-ray:dev
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests: {cpu: "500m", memory: "1Gi"}
+              limits: {cpu: "1", memory: "2Gi"}
+            env:
+              # The ranking-model token lives on the cluster, never in a per-job
+              # RayJob CR (docs/adr/0028). Optional so the cluster starts without it.
+              - name: ZZ_AI_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: zumble-zay-secrets
+                    key: AI_TOKEN
+                    optional: true
+  workerGroupSpecs:
+    - groupName: small
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 2
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-worker
+              image: localhost/zz-ray:dev
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests: {cpu: "500m", memory: "1Gi"}
+                limits: {cpu: "1", memory: "2Gi"}

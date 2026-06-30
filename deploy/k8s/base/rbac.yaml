@@ -24,6 +24,14 @@ rules:
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["create", "get", "delete"]
+  # Optional ray/kuberay substrate (LAUNCHER=ray, docs/adr/0028). The launcher
+  # creates a RayJob per agent job and polls its status to completion; delete is
+  # for best-effort cleanup (RayJob also self-reaps via shutdownAfterJobFinishes).
+  # Harmless when unused (and when the CRD is absent). Requires the KubeRay
+  # operator + CRDs and a standing RayCluster named by RAY_CLUSTER.
+  - apiGroups: ["ray.io"]
+    resources: ["rayjobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

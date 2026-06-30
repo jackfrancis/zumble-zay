@@ -41,6 +41,7 @@ LAUNCHER ?= k8s-job
 # LAUNCHER value (agent-sandbox).
 ORCHESTRATOR_GO_TAGS = $(strip $(ORCHESTRATOR_GO_TAGS_LIST))
 ORCHESTRATOR_GO_TAGS_LIST += $(if $(filter agent-sandbox,$(LAUNCHER)),agent_sandbox,)
+ORCHESTRATOR_GO_TAGS_LIST += $(if $(filter ray,$(LAUNCHER)),ray,)
 # Pinned agent-sandbox release for the optional controller + CRDs install.
 AGENT_SANDBOX_VERSION ?= v0.5.0
 
