@@ -17,7 +17,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -29,8 +28,10 @@ const (
 	DefaultEndpoint = "https://api.githubcopilot.com/chat/completions"
 	// DefaultModel is the default ranking model; override with config/AI_MODEL.
 	DefaultModel = "claude-opus-4.8"
-	// copilotIntegrationID is required by Copilot's endpoint and sent only when
-	// the endpoint host is a Copilot host.
+	// copilotIntegrationID is required by GitHub Copilot's chat endpoint. It is a
+	// public, non-secret constant and is ignored by other OpenAI-compatible
+	// providers, so the runtime sends it on every request — which also lets it
+	// reach Copilot through an LLM gateway/proxy whose host cannot be detected.
 	copilotIntegrationID = "copilot-developer-cli"
 	maxBody              = 1 << 20 // 1 MiB; ranking responses are tiny
 )
@@ -196,7 +197,7 @@ func chatComplete(ctx context.Context, httpClient *http.Client, endpoint, token 
 // chat posts a chat-completions request and returns the assistant's message,
 // including any tool calls. Unlike chatComplete it does not require content,
 // since a tool-calling turn returns tool_calls with empty content (docs/adr/0020).
-// It sends the Copilot integration header when the endpoint is a Copilot host.
+// It always sends the Copilot integration header (see copilotIntegrationID).
 func chat(ctx context.Context, httpClient *http.Client, endpoint, token string, body chatRequest) (chatMessage, error) {
 	reqBody, err := json.Marshal(body)
 	if err != nil {
@@ -209,9 +210,9 @@ func chat(ctx context.Context, httpClient *http.Client, endpoint, token string, 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	if isCopilotHost(endpoint) {
-		req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
-	}
+	// Sent unconditionally: required by Copilot (direct or behind a gateway/proxy),
+	// ignored by other OpenAI-compatible providers (docs/adr/0014).
+	req.Header.Set("Copilot-Integration-Id", copilotIntegrationID)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return chatMessage{}, fmt.Errorf("chat request: %w", err)
@@ -265,17 +266,6 @@ func chat(ctx context.Context, httpClient *http.Client, endpoint, token string, 
 		FinishReason: cr.Choices[0].FinishReason,
 		raw:          raw,
 	}, nil
-}
-
-// isCopilotHost reports whether the endpoint's host is a GitHub Copilot host, in
-// which case the Copilot-Integration-Id header is required.
-func isCopilotHost(endpoint string) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return false
-	}
-	h := u.Hostname()
-	return h == "githubcopilot.com" || strings.HasSuffix(h, ".githubcopilot.com")
 }
 
 // stripFences removes a ```json ... ``` markdown fence if the model wrapped its

@@ -1,0 +1,112 @@
+# agentgateway as the LLM egress proxy (dev prototype).
+#
+# Every agent runtime's chat-completions call goes THROUGH this gateway instead
+# of directly to the provider. The provider key lives only here (sourced from
+# zumble-zay-secrets/AI_TOKEN), so the runtimes hold no model credential — the
+# dev overlay points AI_ENDPOINT at this Service and drops the runtime token
+# (AI_TOKEN_SECRET_NAME=""). This is the agent->LLM hop only; it has nothing to
+# do with how agents are launched.
+#
+# Port/path are agentgateway's simplified-LLM-mode defaults (confirmed live on
+# v1.3.1): the LLM listener binds :4000 and serves the OpenAI-compatible API at
+# /chat/completions (it mirrors the upstream path). If a future bump changes
+# them, align the Service/containerPort here and the AI_ENDPOINT in kustomization.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zumble-zay-agentgateway-config
+data:
+  config.yaml: |
+    # yaml-language-server: $schema=https://agentgateway.dev/schema/config
+    # Front GitHub Copilot's OpenAI-compatible chat-completions API. The key is
+    # injected as $PROVIDER_API_KEY (env), never written into this ConfigMap.
+    llm:
+      models:
+        - name: "*"
+          provider:
+            custom:
+              formats:
+                - type: completions # serves <baseUrl>/chat/completions
+          params:
+            apiKey: "$PROVIDER_API_KEY"
+            model: claude-opus-4.8
+            baseUrl: "https://api.githubcopilot.com"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zumble-zay-agentgateway
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: agentgateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zumble-zay
+      app.kubernetes.io/component: agentgateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zumble-zay
+        app.kubernetes.io/component: agentgateway
+    spec:
+      containers:
+        - name: agentgateway
+          # Official release images are on agentgateway's own registry, NOT
+          # ghcr.io (which publishes only dev/signature tags). Note the `v`
+          # prefix. Pin to a release; bump deliberately.
+          image: cr.agentgateway.dev/agentgateway:v1.3.1
+          args: ["-f", "/config/config.yaml"]
+          env:
+            # The real provider key lives only in the gateway, sourced from the
+            # same Secret the runtimes used to read — but now only the gateway
+            # does. REQUIRED: agentgateway resolves $PROVIDER_API_KEY at startup,
+            # so zumble-zay-secrets MUST carry an AI_TOKEN key. Not optional: a
+            # missing key then fails the pod with a clear "couldn't find key
+            # AI_TOKEN" instead of a cryptic agentgateway runtime error.
+            - name: PROVIDER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: zumble-zay-secrets
+                  key: AI_TOKEN
+          ports:
+            # agentgateway's simplified LLM listener defaults to :4000.
+            - name: http
+              containerPort: 4000
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: zumble-zay-agentgateway-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zumble-zay-agentgateway
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: agentgateway
+spec:
+  selector:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: agentgateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

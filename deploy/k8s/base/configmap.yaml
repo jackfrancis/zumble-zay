@@ -37,10 +37,16 @@ data:
   # RUNTIME_NAMESPACE: "zumble-zay"
   # RUNTIME_ZZ_BASE_URL: "http://zumble-zay:8080"
   # RUNTIME_SERVICE_ACCOUNT: ""
-  # Ranking model for llm-rank jobs (ADR 0011/0014). The AxisRanker speaks the
-  # OpenAI-compatible chat-completions API, so any such endpoint works; the
-  # default is GitHub Copilot. The model token is a SECRET (key AI_TOKEN in
-  # zumble-zay-secrets); without it the ranker falls back to the deterministic
-  # StubRanker (no external calls).
-  AI_ENDPOINT: "https://api.githubcopilot.com/chat/completions"
+  # Model for the LLM runtimes (ADR 0011/0014). The runtimes speak the
+  # OpenAI-compatible chat-completions API. A real model client is built when
+  # EITHER AI_ENDPOINT or the AI_TOKEN secret is set; with neither, the runtime
+  # falls back to the deterministic StubRanker (no external calls) — the safe
+  # default. Enable the model one of two ways:
+  #   - Direct provider: set the AI_TOKEN secret (key AI_TOKEN in
+  #     zumble-zay-secrets). The endpoint defaults to GitHub Copilot; override
+  #     with AI_ENDPOINT.
+  #   - In-cluster LLM gateway (agentgateway): point AI_ENDPOINT at the gateway
+  #     Service and DROP the runtime token (AI_TOKEN_SECRET_NAME=""); the gateway
+  #     holds the provider key. See overlays/dev for a worked example.
+  # AI_ENDPOINT: "https://api.githubcopilot.com/chat/completions"
   AI_MODEL: "claude-opus-4.8"

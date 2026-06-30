@@ -63,21 +63,6 @@ func TestProposeErrorsOnNon200(t *testing.T) {
 	}
 }
 
-func TestIsCopilotHost(t *testing.T) {
-	cases := map[string]bool{
-		"https://api.githubcopilot.com/chat/completions": true,
-		"https://githubcopilot.com/x":                    true,
-		"https://api.openai.com/v1/chat/completions":     false,
-		"http://localhost:11434/v1/chat/completions":     false,
-		"https://evil-githubcopilot.com.attacker.test/x": false,
-	}
-	for endpoint, want := range cases {
-		if got := isCopilotHost(endpoint); got != want {
-			t.Errorf("isCopilotHost(%q) = %v, want %v", endpoint, got, want)
-		}
-	}
-}
-
 func TestStripFences(t *testing.T) {
 	in := "```json\n{\"relevance\":0.5}\n```"
 	if got := stripFences(in); got != `{"relevance":0.5}` {

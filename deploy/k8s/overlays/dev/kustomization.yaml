@@ -1,9 +1,18 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# Pin the namespace at the overlay level. The base sets it too, but that
+# directive does NOT reach resources added by THIS overlay (e.g. agentgateway.yaml),
+# which would otherwise land in the caller's current namespace. Setting it here
+# keeps every resource — base and overlay — in zumble-zay.
+namespace: zumble-zay
+
 # Dev overlay: local cluster, no public TLS ingress (use `kubectl port-forward`).
 resources:
   - ../../base
+  # agentgateway as the in-cluster LLM egress proxy: agents call it instead of
+  # the provider directly, and the provider key lives only in the gateway.
+  - agentgateway.yaml
 
 # Drop the public Ingress for local development.
 patches:
@@ -25,6 +34,13 @@ configMapGenerator:
       - BASE_URL=http://localhost:8080
       - ALLOWED_ORIGINS=http://localhost:8080
       - COOKIE_SECURE=false
+      # Route the agents' model calls through the in-cluster agentgateway, and
+      # DROP the runtime model token (the gateway holds the provider key). The
+      # gateway's simplified LLM listener serves /chat/completions on :4000
+      # (Service :80 -> :4000). If a bump changes that, fix this URL and
+      # agentgateway.yaml together.
+      - AI_ENDPOINT=http://zumble-zay-agentgateway/chat/completions
+      - AI_TOKEN_SECRET_NAME=
 
 images:
   - name: zumble-zay

@@ -41,7 +41,7 @@ type RunParams struct {
 	Researcher    worklist.ResearchRanker    // research re-ranker for github-research jobs; nil builds one from the AI token
 	AIEndpoint    string                     // chat-completions URL for the llm-rank ranker
 	AIModel       string                     // ranking model id; empty uses the llm default
-	AIToken       string                     // bearer token for the ranking model; empty falls back to the stub
+	AIToken       string                     // bearer token for the model; with no endpoint and no token, falls back to the stub
 	// ReportCompletion makes Run post a terminal completion to ZZ when the job
 	// finishes (docs/adr/0024). The out-of-process runtime (cmd/runtime) sets it
 	// so the orchestrator finalizes the job immediately; the in-process launcher
@@ -118,13 +118,14 @@ func dispatch(ctx context.Context, p RunParams) error {
 
 // rankerFor selects the AxisRanker for a rank job: an explicitly injected ranker
 // wins (tests, or the in-process WithRanker seam); otherwise a chat-model ranker
-// is built when an AI token is configured; otherwise the deterministic stub
-// keeps the pipeline exercisable with no model attached (docs/adr/0011).
+// is built when a model endpoint OR token is configured (an in-cluster LLM
+// gateway needs no client token); otherwise the deterministic stub keeps the
+// pipeline exercisable with no model attached (docs/adr/0011).
 func rankerFor(p RunParams) worklist.AxisRanker {
 	switch {
 	case p.Ranker != nil:
 		return p.Ranker
-	case p.AIToken != "":
+	case p.AIEndpoint != "" || p.AIToken != "":
 		return llm.NewRanker(llm.Config{
 			Endpoint: p.AIEndpoint,
 			Model:    p.AIModel,
@@ -138,14 +139,15 @@ func rankerFor(p RunParams) worklist.AxisRanker {
 
 // converserFor builds the Conversationalist for a github-converse job. An
 // explicitly injected converser wins (tests, or an in-process WithConverser
-// seam); otherwise one is built from the AI token configured for the runtime.
-// With neither there is no assistant, so the job cannot proceed (the server
-// gates the endpoint on the same token, so this is defence in depth).
+// seam); otherwise one is built when a model endpoint or token is configured (an
+// in-cluster LLM gateway needs no client token). With neither there is no
+// assistant, so the job cannot proceed (the server gates the endpoint the same
+// way, so this is defence in depth).
 func converserFor(p RunParams) worklist.Conversationalist {
 	switch {
 	case p.Converser != nil:
 		return p.Converser
-	case p.AIToken != "":
+	case p.AIEndpoint != "" || p.AIToken != "":
 		return llm.NewConverser(llm.Config{
 			Endpoint: p.AIEndpoint,
 			Model:    p.AIModel,
@@ -159,13 +161,14 @@ func converserFor(p RunParams) worklist.Conversationalist {
 
 // researchRankerFor selects the ResearchRanker for a github-research job: an
 // explicitly injected ranker wins (tests, or the in-process WithResearcher seam);
-// otherwise one is built from the AI token; with neither there is no ranker, so
-// the job cannot proceed (docs/adr/0022).
+// otherwise one is built when a model endpoint or token is configured (an
+// in-cluster LLM gateway needs no client token); with neither there is no ranker,
+// so the job cannot proceed (docs/adr/0022).
 func researchRankerFor(p RunParams) worklist.ResearchRanker {
 	switch {
 	case p.Researcher != nil:
 		return p.Researcher
-	case p.AIToken != "":
+	case p.AIEndpoint != "" || p.AIToken != "":
 		return llm.NewResearchRanker(llm.Config{
 			Endpoint: p.AIEndpoint,
 			Model:    p.AIModel,

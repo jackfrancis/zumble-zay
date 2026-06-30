@@ -147,10 +147,13 @@ func Load() (*Config, error) {
 		},
 		BotReviewers: botReviewers,
 		AI: AIConfig{
-			Endpoint:        os.Getenv("AI_ENDPOINT"),
-			Model:           os.Getenv("AI_MODEL"),
-			Token:           os.Getenv("AI_TOKEN"),
-			TokenSecretName: getEnv("AI_TOKEN_SECRET_NAME", "zumble-zay-secrets"),
+			Endpoint: os.Getenv("AI_ENDPOINT"),
+			Model:    os.Getenv("AI_MODEL"),
+			Token:    os.Getenv("AI_TOKEN"),
+			// lookupEnvOr (not getEnv) so an overlay can DROP the runtime's model
+			// token by setting AI_TOKEN_SECRET_NAME="" — used when an in-cluster LLM
+			// gateway holds the provider key and the runtime needs no credential.
+			TokenSecretName: lookupEnvOr("AI_TOKEN_SECRET_NAME", "zumble-zay-secrets"),
 			TokenSecretKey:  getEnv("AI_TOKEN_SECRET_KEY", "AI_TOKEN"),
 		},
 		MintPrivateKey:    mintPriv,
@@ -193,6 +196,17 @@ func loadMintKeys(seed []byte) (ed25519.PrivateKey, ed25519.PublicKey, error) {
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// lookupEnvOr returns the value of key if it is present in the environment (even
+// when explicitly set to the empty string), else fallback. Unlike getEnv, an
+// explicit empty value is honored — so a deployment can disable a defaulted name
+// (e.g. AI_TOKEN_SECRET_NAME="" to stop injecting the runtime model token).
+func lookupEnvOr(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return fallback
