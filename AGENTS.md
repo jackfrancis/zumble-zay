@@ -134,9 +134,14 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   injection) are the validated in-cluster baseline. A new substrate is a new
   `orchestrator.Launcher` (optionally `AsyncLauncher`) + a `launcher.Register`
   from its package init + a blank import in `cmd/orchestrator` — it must not modify
-  the existing launchers. Any change to a shared seam (the `Launcher`/
+  the existing launchers. An **optional** substrate that pulls a heavy or uncommon
+  dependency lives behind a build tag (e.g. `agent-sandbox`, `//go:build
+  agent_sandbox`, ADR 0026): it self-registers, is blank-imported in
+  `cmd/orchestrator` under the same tag, and is absent from the default build. Any
+  change to a shared seam (the `Launcher`/
   `AsyncLauncher` interfaces, the `ZZClient`/`ZZ_*` contract, the shared
-  `runtimeContainer`/`runtimeEnvVars` helpers, `JobSpec`, or the orchestrator's
+  `internal/runtimespec` helpers — the runtime container/env/labels every
+  substrate emits — `JobSpec`, or the orchestrator's
   dispatch/completion path) must be backward-compatible and keep the reference
   launchers' tests green — identical pipeline output across `inprocess`/`k8s-job`/
   `k8s-pod` is the regression check (ADR 0012, 0024).
@@ -182,16 +187,23 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    scope-gated, with provenance and optimistic concurrency.
 5. Cloud persistence behind `worklist.Store`; shared session store; then scale
    `replicas > 1`.
-6. Additional agent substrates behind the `Launcher` seam (ADR 0012 step 7):
-   `KueueLauncher` (admission/quota), `SandboxLauncher` (isolation), and
-   `KagentLauncher`. The plumbing is now in place (ADR 0024): a launcher
+6. Additional agent substrates behind the `Launcher` seam (ADR 0012 step 7).
+   **DONE — `agent-sandbox` (isolation), an optional build-tagged substrate
+   (ADR 0026):** `internal/agentsandbox` creates a `Sandbox` CR
+   (`agents.x-k8s.io/v1beta1`) via the client-go dynamic client (no new module),
+   detached completion with native self-reap, gated behind `//go:build
+   agent_sandbox` and selected with `LAUNCHER=agent-sandbox`; the shared runtime
+   shape moved to `internal/runtimespec`. Remaining: `KueueLauncher`
+   (admission/quota) and `KagentLauncher`. The plumbing is in place (ADR 0024): a
+   launcher
    **registry** (`internal/launcher`, driver pattern — implement `Launcher`,
    `Register` from a package init, blank-import in `cmd/orchestrator`), **async**
    dispatch (`AsyncLauncher` Dispatch/Await, so a slow job never pins a worker
    and completion is decoupled from `Launch` returning), and an RFC 8693-flavored
    **token-exchange** endpoint (`POST /control/token`) for service runtimes
-   (kagent) that pull a per-job token. The substrate launchers themselves are
-   intentionally additive TODOs; the three existing launchers are the references.
+   (kagent) that pull a per-job token. The remaining substrate launchers are
+   additive TODOs; the four in-cluster launchers plus `agent-sandbox` are the
+   references.
    Runtimes report terminal completion (`POST /agent/complete`) which the
    orchestrator races against the launcher watch (ADR 0025), so the k8s launcher
    is callback-driven with no code change. Remaining: per-service caller identity

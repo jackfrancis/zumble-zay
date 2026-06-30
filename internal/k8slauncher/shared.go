@@ -1,69 +1,41 @@
 // The runtime workload is identical across substrate launchers: the same image
-// and the same injection-contract environment (docs/adr/0012). Only the
-// workload wrapper differs (Job, bare Pod, ...). These helpers keep that shared
-// shape in one place so the launchers stay directly comparable.
+// and the same injection-contract environment (docs/adr/0012). Only the workload
+// wrapper differs (Job, bare Pod, ...). These thin wrappers map the launcher
+// Config onto the substrate-neutral runtimespec helpers, so the Job and Pod
+// launchers emit the identical runtime container and labels as any other
+// substrate (the cross-substrate non-regression check).
 package k8slauncher
 
 import (
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/jackfrancis/zumble-zay/internal/agent"
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
+	"github.com/jackfrancis/zumble-zay/internal/runtimespec"
 )
 
-// runtimeEnvVars builds the injection-contract environment for the runtime
-// container from the job spec and its minted token.
-func runtimeEnvVars(cfg Config, spec orchestrator.JobSpec, token string) []corev1.EnvVar {
-	env := agent.Env(agent.RunParams{
-		JobType:       string(spec.Type),
-		BaseURL:       cfg.ZZBaseURL,
-		Token:         token,
-		Provider:      spec.Provider,
-		ItemID:        spec.ItemID,
-		GitHubBaseURL: cfg.GitHubBaseURL,
-		AIEndpoint:    cfg.AIEndpoint,
-		AIModel:       cfg.AIModel,
-	})
-	envVars := make([]corev1.EnvVar, 0, len(env))
-	for k, v := range env {
-		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
+// runtimeOptions maps the launcher Config onto the substrate-neutral runtime
+// settings shared by every substrate (docs/adr/0012).
+func (c Config) runtimeOptions() runtimespec.Options {
+	return runtimespec.Options{
+		Image:             c.Image,
+		ZZBaseURL:         c.ZZBaseURL,
+		GitHubBaseURL:     c.GitHubBaseURL,
+		ServiceAccount:    c.ServiceAccount,
+		AIEndpoint:        c.AIEndpoint,
+		AIModel:           c.AIModel,
+		AITokenSecretName: c.AITokenSecretName,
+		AITokenSecretKey:  c.AITokenSecretKey,
 	}
-	return envVars
 }
 
-// runtimeContainer is the single runtime container every substrate launcher
-// runs; only the surrounding workload (Job, Pod, ...) differs. The ranking
-// model token, when configured, is injected by Secret reference so it never
-// appears as a plain value in the workload spec.
+// runtimeContainer is the runtime container the Job and Pod launchers run,
+// identical to any other substrate (docs/adr/0012).
 func runtimeContainer(cfg Config, spec orchestrator.JobSpec, token string) corev1.Container {
-	env := runtimeEnvVars(cfg, spec, token)
-	if cfg.AITokenSecretName != "" {
-		optional := true
-		env = append(env, corev1.EnvVar{
-			Name: agent.EnvAIToken,
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: cfg.AITokenSecretName},
-					Key:                  cfg.AITokenSecretKey,
-					Optional:             &optional,
-				},
-			},
-		})
-	}
-	return corev1.Container{
-		Name:            "runtime",
-		Image:           cfg.Image,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Env:             env,
-	}
+	return runtimespec.Container(cfg.runtimeOptions(), spec, token)
 }
 
 // runtimeLabels are the observability labels shared by runtime workloads, so
 // jobs and pods are selectable the same way (e.g. by job-type or acting user).
 func runtimeLabels(spec orchestrator.JobSpec) map[string]string {
-	return map[string]string{
-		"app.kubernetes.io/name":     "zumble-zay-runtime",
-		"zumble-zay.dev/job-type":    string(spec.Type),
-		"zumble-zay.dev/acting-user": sanitizeLabel(spec.ActingUserID),
-	}
+	return runtimespec.Labels(spec)
 }

@@ -23,6 +23,18 @@ RUNTIME_IMAGE ?= localhost/zumble-zay-runtime:dev
 ORCHESTRATOR_BIN := bin/orchestrator
 ORCHESTRATOR_IMAGE ?= localhost/zumble-zay-orchestrator:dev
 
+# Agent-runtime substrate selected for the dev cluster (docs/adr/0012). It drives
+# the whole `make dev-up` cycle: with LAUNCHER=agent-sandbox (ADR 0026) the
+# orchestrator image is built with the agent_sandbox build tag, the agent-sandbox
+# controller + CRDs are installed, and the orchestrator is deployed with it
+# selected. Defaults to the deployed default, so a bare `make dev-up` is unchanged.
+LAUNCHER ?= k8s-job
+# agent-sandbox is the only build-tagged substrate today; compile it into the
+# orchestrator image only when it is the selected launcher.
+ORCHESTRATOR_GO_TAGS := $(if $(filter agent-sandbox,$(LAUNCHER)),agent_sandbox,)
+# Pinned agent-sandbox release for the optional controller + CRDs install.
+AGENT_SANDBOX_VERSION ?= v0.5.0
+
 # Vendored GitHub Primer CSS (the UI's design system, served from the binary).
 # `make vendor-primer` refreshes these at the pinned versions; bump the versions
 # and re-run to scoop in updates.
@@ -96,9 +108,11 @@ image: engine
 image-runtime: engine
 	$(CONTAINER_ENGINE) build -f Dockerfile.runtime -t $(RUNTIME_IMAGE) .
 
-# Build the orchestrator control-plane image (docs/adr/0023).
+# Build the orchestrator control-plane image (docs/adr/0023). GO_TAGS compiles in
+# build-tagged substrates when selected (empty by default, so the image is
+# unchanged unless LAUNCHER=agent-sandbox).
 image-orchestrator: engine
-	$(CONTAINER_ENGINE) build -f Dockerfile.orchestrator -t $(ORCHESTRATOR_IMAGE) .
+	$(CONTAINER_ENGINE) build -f Dockerfile.orchestrator --build-arg GO_TAGS=$(ORCHESTRATOR_GO_TAGS) -t $(ORCHESTRATOR_IMAGE) .
 
 # Export the image to a portable archive (works with docker and podman).
 image-save: image
@@ -143,8 +157,10 @@ cluster-down:
 # One shot: build the images from the current source, stand up a kind cluster,
 # load them, deploy the dev overlay, and wait until both tiers are ready. Three
 # images are loaded: the web tier, the orchestrator control plane (docs/adr/0023),
-# and the runtime — the deployed default LAUNCHER is k8s-job, so the orchestrator
-# runs agent jobs from the runtime image (ADR 0012).
+# and the runtime. LAUNCHER selects the agent substrate (default k8s-job); set
+# LAUNCHER=agent-sandbox to build the orchestrator with the agent_sandbox tag,
+# install the agent-sandbox controller + CRDs, and deploy with it selected
+# (docs/adr/0026).
 dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	@kubectl create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl apply -f -
 	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets >/dev/null 2>&1 || \
@@ -157,7 +173,22 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets -o jsonpath='{.data.CONTROL_PLANE_TOKEN}' 2>/dev/null | grep -q . || \
 		kubectl -n $(KUBE_NS) patch secret zumble-zay-secrets --type merge \
 			-p "{\"stringData\":{\"CONTROL_PLANE_TOKEN\":\"$$(openssl rand -base64 48 | tr -d '\n')\"}}"
+	# Optional agent-sandbox substrate: install its controller + CRDs so the
+	# orchestrator can create Sandboxes (docs/adr/0026). Only when selected; the
+	# CRD wait is best-effort so a slow controller rollout does not fail dev-up.
+	@if [ "$(LAUNCHER)" = "agent-sandbox" ]; then \
+		echo "installing agent-sandbox $(AGENT_SANDBOX_VERSION) (controller + CRDs)"; \
+		kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$(AGENT_SANDBOX_VERSION)/manifest.yaml; \
+		kubectl wait --for=condition=Established crd/sandboxes.agents.x-k8s.io --timeout=60s || true; \
+	fi
 	kubectl apply -k deploy/k8s/overlays/dev
+	# Select the launcher on the orchestrator when it differs from the ConfigMap
+	# default (k8s-job): an explicit container env wins over envFrom, so this
+	# overrides the deployed LAUNCHER without editing the kustomize ConfigMap.
+	@if [ "$(LAUNCHER)" != "k8s-job" ]; then \
+		echo "selecting LAUNCHER=$(LAUNCHER) on the orchestrator"; \
+		kubectl -n $(KUBE_NS) set env deploy/zumble-zay-orchestrator LAUNCHER=$(LAUNCHER); \
+	fi
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is
 	# created, leaving the old code running. kind-load already replaced the image

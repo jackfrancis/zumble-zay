@@ -23,7 +23,11 @@ data:
   # runtime's callback (ADR 0025), so it needs only Pod-create RBAC — the
   # in-cluster reference for a fully detached substrate. "inprocess" runs jobs in
   # the orchestrator process and is the code-level default for non-cluster runs
-  # (local, tests, CI). An unknown value fails fast at startup.
+  # (local, tests, CI). "agent-sandbox" runs each job as a kubernetes-sigs
+  # agent-sandbox Sandbox for gVisor/Kata isolation (ADR 0026) — an OPTIONAL
+  # substrate compiled in only with `-tags agent_sandbox`; it also needs the
+  # agent-sandbox controller + CRDs installed and the sandboxes RBAC rule. An
+  # unknown (or not-compiled-in) value fails fast at startup.
   LAUNCHER: "k8s-job"
   # Out-of-process runtime settings, used by the orchestrator when LAUNCHER is
   # k8s-job or k8s-pod. These have code defaults; override per environment.

@@ -11,9 +11,12 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Build a static, stripped binary.
+# Build a static, stripped binary. GO_TAGS optionally compiles in build-tagged
+# substrates — e.g. agent_sandbox (docs/adr/0026), so LAUNCHER=agent-sandbox is
+# selectable. Empty by default, so the normal image is unchanged.
+ARG GO_TAGS=
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/orchestrator ./cmd/orchestrator
+RUN CGO_ENABLED=0 GOOS=linux go build -tags="$GO_TAGS" -trimpath -ldflags="-s -w" -o /out/orchestrator ./cmd/orchestrator
 
 # ---- runtime stage ----
 # distroless static: no shell, non-root by default, ships CA certs for the

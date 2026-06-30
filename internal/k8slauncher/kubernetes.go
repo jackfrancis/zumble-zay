@@ -9,7 +9,6 @@ package k8slauncher
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -133,16 +132,4 @@ func (l *KubernetesJobLauncher) waitForCompletion(ctx context.Context, name stri
 		case <-ticker.C:
 		}
 	}
-}
-
-var labelInvalid = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
-
-// sanitizeLabel makes s a valid Kubernetes label value (<=63 chars, limited
-// charset), for observability labels like the acting user.
-func sanitizeLabel(s string) string {
-	s = labelInvalid.ReplaceAllString(s, "-")
-	if len(s) > 63 {
-		s = s[:63]
-	}
-	return s
 }

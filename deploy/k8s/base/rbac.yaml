@@ -17,6 +17,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # Optional agent-sandbox substrate (LAUNCHER=agent-sandbox, docs/adr/0026). It
+  # is detached, so it only creates a Sandbox and lets it self-reap via scheduled
+  # deletion; delete is for best-effort early cleanup. Harmless when unused (and
+  # when the CRD is absent). Requires the agent-sandbox controller + CRDs.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["create", "get", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

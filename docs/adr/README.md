@@ -30,3 +30,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0023](0023-orchestrator-own-runtime-and-identity.md) | Extract the orchestrator into its own runtime and identity (asymmetric mint, control API) | Accepted |
 | [0024](0024-agent-runtime-portability.md) | Agent-runtime portability: launcher registry, async dispatch, and token exchange | Accepted |
 | [0025](0025-callback-driven-completion.md) | Callback-driven job completion (the runtime reports; the orchestrator races it against the watch) | Accepted |
+| [0026](0026-agent-sandbox-substrate.md) | agent-sandbox as an optional, build-tagged substrate (dynamic-client Sandbox CR, detached completion) | Accepted |
