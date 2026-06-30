@@ -145,6 +145,19 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   dispatch/completion path) must be backward-compatible and keep the reference
   launchers' tests green — identical pipeline output across `inprocess`/`k8s-job`/
   `k8s-pod` is the regression check (ADR 0012, 0024).
+- **Concurrent substrate work stays merge-clean.** Multiple new substrates in
+  parallel (e.g. ray/kuberay and opensandbox) are conflict-free as long as each
+  touches only its *own* files: a new `internal/<substrate>` package and its
+  *own* `//go:build`-tagged blank-import file in `cmd/orchestrator` (never a
+  shared one). Keep substrate-specific knobs (endpoints, API keys, pinned
+  versions) in the launcher's own `build()`/package rather than adding them to
+  `internal/config` — a remote control-plane substrate needs no shared config at
+  all. The Makefile's `ORCHESTRATOR_GO_TAGS` is append-friendly (`+=` one line
+  per tagged substrate); per-substrate cluster prerequisites (RBAC rules,
+  controller installs) are additive, never edits to the base defaults (`LAUNCHER`
+  stays `k8s-job`). Reserve the next free ADR number and add its README row in
+  your first PR so two efforts don't claim the same one — reserved so far:
+  **0027** opensandbox, **0028** ray/kuberay.
 
 ## Build / dev / test
 

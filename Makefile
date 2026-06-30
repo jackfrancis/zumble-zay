@@ -29,9 +29,16 @@ ORCHESTRATOR_IMAGE ?= localhost/zumble-zay-orchestrator:dev
 # controller + CRDs are installed, and the orchestrator is deployed with it
 # selected. Defaults to the deployed default, so a bare `make dev-up` is unchanged.
 LAUNCHER ?= k8s-job
-# agent-sandbox is the only build-tagged substrate today; compile it into the
-# orchestrator image only when it is the selected launcher.
-ORCHESTRATOR_GO_TAGS := $(if $(filter agent-sandbox,$(LAUNCHER)),agent_sandbox,)
+# Optional build-tagged substrates compile into the orchestrator image only when
+# selected. Each adds its Go build tag on its OWN line via += — so a new substrate
+# (e.g. a future ray/kuberay or opensandbox) appends a line rather than editing a
+# shared one, keeping concurrent launcher work merge-clean. ORCHESTRATOR_GO_TAGS is
+# recursively expanded and $(strip)s the accumulated list (empty when no tagged
+# substrate is selected), so the += lines below may be extended in any order. The
+# Go-identifier tag (agent_sandbox) is the underscore form of the hyphenated
+# LAUNCHER value (agent-sandbox).
+ORCHESTRATOR_GO_TAGS = $(strip $(ORCHESTRATOR_GO_TAGS_LIST))
+ORCHESTRATOR_GO_TAGS_LIST += $(if $(filter agent-sandbox,$(LAUNCHER)),agent_sandbox,)
 # Pinned agent-sandbox release for the optional controller + CRDs install.
 AGENT_SANDBOX_VERSION ?= v0.5.0
 
