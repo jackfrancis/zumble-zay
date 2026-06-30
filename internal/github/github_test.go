@@ -4,13 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
-// searchBody includes two PRs and one plain issue (no pull_request). The issue
-// must be filtered out, and the PRs deduped across the three signal queries.
+// searchBody includes two PRs and one plain issue (no pull_request). All three
+// are kept (the issue as TypeIssue) and deduped across the signal queries.
 const searchBody = `{"items":[
   {"number":1,"title":"Fix bug","html_url":"https://github.com/octo/repo/pull/1","state":"open","created_at":"2026-06-19T10:00:00Z","updated_at":"2026-06-20T10:00:00Z","comments":5,"repository_url":"https://api.github.com/repos/octo/repo","labels":[{"name":"sig/foo"},{"name":"kind/bug"}],"milestone":{"due_on":"2026-07-01T00:00:00Z"},"reactions":{"total_count":7},"pull_request":{"url":"https://api.github.com/repos/octo/repo/pulls/1"}},
   {"number":2,"title":"Add feature","html_url":"https://github.com/octo/repo/pull/2","state":"open","updated_at":"2026-06-21T10:00:00Z","repository_url":"https://api.github.com/repos/octo/repo","pull_request":{"url":"https://api.github.com/repos/octo/repo/pulls/2"}},
@@ -19,6 +20,7 @@ const searchBody = `{"items":[
 
 func TestFetchWorklistMapsFiltersAndDedupes(t *testing.T) {
 	var calls int
+	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search/issues" {
 			t.Errorf("unexpected path %q", r.URL.Path)
@@ -27,6 +29,7 @@ func TestFetchWorklistMapsFiltersAndDedupes(t *testing.T) {
 			t.Errorf("missing bearer token: %q", r.Header.Get("Authorization"))
 		}
 		calls++
+		queries = append(queries, r.URL.Query().Get("q"))
 		_, _ = w.Write([]byte(searchBody))
 	}))
 	defer srv.Close()
@@ -36,19 +39,26 @@ func TestFetchWorklistMapsFiltersAndDedupes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchWorklist: %v", err)
 	}
-	if calls != 3 {
-		t.Fatalf("expected 3 signal queries, got %d", calls)
+	if calls != 4 {
+		t.Fatalf("expected 4 signal queries, got %d", calls)
 	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 deduped PRs (issue filtered), got %d", len(items))
+	// One of the queries surfaces issues and PRs the user commented on.
+	var sawCommented bool
+	for _, q := range queries {
+		if strings.Contains(q, "commenter:@me") {
+			sawCommented = true
+		}
+	}
+	if !sawCommented {
+		t.Errorf("expected a commenter:@me query, got %v", queries)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 deduped items (2 PRs + 1 issue), got %d", len(items))
 	}
 
 	ids := make(map[string]worklist.WorkItem, len(items))
 	for _, it := range items {
 		ids[it.ID] = it
-		if it.Type != worklist.TypePullRequest {
-			t.Errorf("non-PR leaked through: %+v", it)
-		}
 		if it.GitHub.Repo != "octo/repo" {
 			t.Errorf("repo not parsed from repository_url: %q", it.GitHub.Repo)
 		}
@@ -56,22 +66,33 @@ func TestFetchWorklistMapsFiltersAndDedupes(t *testing.T) {
 			t.Errorf("origin %q != %q", it.Meta.Origin, worklist.OriginAgent)
 		}
 	}
-	if _, ok := ids["github:octo/repo#1"]; !ok {
-		t.Errorf("missing PR #1; got ids %v", ids)
+	if pr := ids["github:octo/repo#1"]; pr.Type != worklist.TypePullRequest {
+		t.Errorf("PR #1 type = %q, want pull_request", pr.Type)
 	}
 	if _, ok := ids["github:octo/repo#2"]; !ok {
 		t.Errorf("missing PR #2; got ids %v", ids)
 	}
+	// The plain issue is now kept as a TypeIssue work item (commented-on radar).
+	issue := ids["github:octo/repo#3"]
+	if issue.ID == "" {
+		t.Errorf("missing issue #3; got ids %v", ids)
+	}
+	if issue.Type != worklist.TypeIssue {
+		t.Errorf("issue #3 type = %q, want issue", issue.Type)
+	}
 
 	// PR #1 carries the cheap signals mapped straight from the search response.
 	pr1 := ids["github:octo/repo#1"]
-	// The stub returns the same body for all three queries, so PR #1 matches
-	// author, assignee, and review-requested: the reasons merge onto one item.
-	if len(pr1.Signals.Reasons) != 3 {
-		t.Errorf("expected 3 merged reasons, got %v", pr1.Signals.Reasons)
+	// The stub returns the same body for all four queries, so PR #1 matches
+	// author, assignee, review-requested, and commented: the reasons merge.
+	if len(pr1.Signals.Reasons) != 4 {
+		t.Errorf("expected 4 merged reasons, got %v", pr1.Signals.Reasons)
 	}
 	if !hasReason(pr1.Signals.Reasons, worklist.ReasonReviewRequested) {
 		t.Errorf("missing review-requested reason: %v", pr1.Signals.Reasons)
+	}
+	if !hasReason(pr1.Signals.Reasons, worklist.ReasonCommented) {
+		t.Errorf("missing commented reason: %v", pr1.Signals.Reasons)
 	}
 	if pr1.Signals.Comments != 5 {
 		t.Errorf("comments = %d, want 5", pr1.Signals.Comments)

@@ -58,11 +58,16 @@ var signals = []struct {
 	{worklist.ReasonAuthor, "is:pr is:open author:@me archived:false"},
 	{worklist.ReasonAssignee, "is:pr is:open assignee:@me archived:false"},
 	{worklist.ReasonReviewRequested, "is:pr is:open review-requested:@me archived:false"},
+	// Issues and PRs the user has commented on. Unlike the others this omits
+	// is:pr, so it surfaces issues too; relevance scoring orders them in
+	// (docs/adr/0008, 0011).
+	{worklist.ReasonCommented, "is:open commenter:@me archived:false"},
 }
 
-// FetchWorklist retrieves the user's authored, assigned, and review-requested
-// pull requests and returns them deduplicated by item ID. When an item surfaces
-// under more than one query, the reasons are merged onto a single work item.
+// FetchWorklist retrieves the issues and pull requests on the user's radar —
+// authored, assigned, review-requested, and commented-on — and returns them
+// deduplicated by item ID. When an item surfaces under more than one query, the
+// reasons are merged onto a single work item.
 func (c *Client) FetchWorklist(ctx context.Context, token string) ([]worklist.WorkItem, error) {
 	now := time.Now().UTC()
 	seen := make(map[string]worklist.WorkItem)
@@ -130,9 +135,12 @@ type searchItem struct {
 }
 
 func (it searchItem) toWorkItem(reason worklist.Reason, now time.Time) (worklist.WorkItem, bool) {
-	// Defensive: the search/issues endpoint can return issues; keep only PRs.
-	if it.PullRequest == nil {
-		return worklist.WorkItem{}, false
+	// The search/issues endpoint returns both issues and PRs; a pull_request
+	// object marks a PR. Both belong on the radar (e.g. a thread the user
+	// commented on), so map the type instead of dropping issues.
+	itemType := worklist.TypeIssue
+	if it.PullRequest != nil {
+		itemType = worklist.TypePullRequest
 	}
 	repo := strings.TrimPrefix(it.RepositoryURL, defaultBaseURL+"/repos/")
 
@@ -157,7 +165,7 @@ func (it searchItem) toWorkItem(reason worklist.Reason, now time.Time) (worklist
 	return worklist.WorkItem{
 		ID:     "github:" + repo + "#" + strconv.Itoa(it.Number),
 		Source: "github",
-		Type:   worklist.TypePullRequest,
+		Type:   itemType,
 		GitHub: worklist.GitHubRef{
 			Number:    it.Number,
 			Repo:      repo,

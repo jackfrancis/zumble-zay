@@ -42,6 +42,7 @@ const (
 	ReasonReviewRequested Reason = "review_requested"
 	ReasonAssignee        Reason = "assignee"
 	ReasonAuthor          Reason = "author"
+	ReasonCommented       Reason = "commented"
 	ReasonMentioned       Reason = "mentioned"
 	ReasonTeamMentioned   Reason = "team_mentioned"
 	ReasonCodeowner       Reason = "codeowner"
