@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -57,6 +58,14 @@ type Credential struct {
 	Expiry      string `json:"expiry"`
 }
 
+// ErrNoCredential is returned by VendCredential when ZZ has no stored credential
+// for the acting user and provider (HTTP 404). It is distinct and actionable: the
+// user has not connected the provider, or the credential was cleared (the vault
+// is in-memory today, so a web-tier restart loses it while a session may persist).
+// A runtime should treat it as "needs (re)consent", not a transient failure to
+// retry.
+var ErrNoCredential = errors.New("no stored credential for the acting user")
+
 // VendCredential performs the first call of the contract:
 // POST /agent/credentials/{provider}, returning the acting user's credential
 // for the named provider.
@@ -74,7 +83,7 @@ func (c *ZZClient) VendCredential(ctx context.Context, provider string) (Credent
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return Credential{}, fmt.Errorf("status %d", resp.StatusCode)
+		return Credential{}, vendError(provider, resp.StatusCode)
 	}
 	var cred Credential
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&cred); err != nil {
@@ -84,6 +93,17 @@ func (c *ZZClient) VendCredential(ctx context.Context, provider string) (Credent
 		return Credential{}, fmt.Errorf("empty access token")
 	}
 	return cred, nil
+}
+
+// vendError maps a non-200 vend response to an error, special-casing 404 (the
+// vault has no credential for this acting user + provider) to a self-explanatory,
+// distinguishable ErrNoCredential rather than a bare status code, so the common
+// "provider not connected / credential cleared" case is obvious in runtime logs.
+func vendError(provider string, status int) error {
+	if status == http.StatusNotFound {
+		return fmt.Errorf("%w: provider %q is not connected (or its stored credential was cleared); (re)connect it", ErrNoCredential, provider)
+	}
+	return fmt.Errorf("vend %s credential: status %d", provider, status)
 }
 
 // Ingest performs the second call of the contract: POST /agent/worklist, handing
