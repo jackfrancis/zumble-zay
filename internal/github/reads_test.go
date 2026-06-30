@@ -136,3 +136,54 @@ func TestSearchFormatsMatches(t *testing.T) {
 		t.Fatalf("search summary missing match: %q", got)
 	}
 }
+
+func TestDiscussionIncludesReviewsAndComments(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/repos/o/r/issues/5":
+			_, _ = w.Write([]byte(`{"body":"the description"}`))
+		case "/repos/o/r/issues/5/comments":
+			_, _ = w.Write([]byte(`[{"body":"general thread","user":{"login":"alice"},"created_at":"2026-06-20T10:00:00Z"}]`))
+		case "/repos/o/r/pulls/5/reviews":
+			// One substantive review and one empty "commented" container.
+			_, _ = w.Write([]byte(`[
+				{"body":"please rebase","state":"CHANGES_REQUESTED","user":{"login":"bob"},"submitted_at":"2026-06-21T10:00:00Z"},
+				{"body":"","state":"COMMENTED","user":{"login":"carol"},"submitted_at":"2026-06-21T11:00:00Z"}
+			]`))
+		case "/repos/o/r/pulls/5/comments":
+			_, _ = w.Write([]byte(`[{"body":"this line is wrong","path":"main.go","user":{"login":"carol"},"created_at":"2026-06-21T11:01:00Z"}]`))
+		case "/repos/o/r/pulls/5/files":
+			_, _ = w.Write([]byte(`[{"filename":"main.go"}]`))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL)
+	d, err := c.Discussion(context.Background(), "tok", "o/r", 5, true)
+	if err != nil {
+		t.Fatalf("Discussion: %v", err)
+	}
+	if d.Body != "the description" {
+		t.Errorf("body = %q", d.Body)
+	}
+	if len(d.Comments) != 1 || d.Comments[0].Author != "alice" {
+		t.Errorf("general comments = %+v", d.Comments)
+	}
+	// The CHANGES_REQUESTED review is kept; the empty COMMENTED review is dropped.
+	if len(d.Reviews) != 1 {
+		t.Fatalf("reviews = %+v, want 1 (empty commented review skipped)", d.Reviews)
+	}
+	if d.Reviews[0].Author != "bob" || d.Reviews[0].State != "changes_requested" || d.Reviews[0].Body != "please rebase" {
+		t.Errorf("review = %+v", d.Reviews[0])
+	}
+	if len(d.ReviewComments) != 1 || d.ReviewComments[0].Author != "carol" {
+		t.Fatalf("review comments = %+v", d.ReviewComments)
+	}
+	if !strings.Contains(d.ReviewComments[0].Body, "main.go") || !strings.Contains(d.ReviewComments[0].Body, "this line is wrong") {
+		t.Errorf("inline comment body = %q (want path + text)", d.ReviewComments[0].Body)
+	}
+}

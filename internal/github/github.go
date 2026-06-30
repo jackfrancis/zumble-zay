@@ -391,14 +391,25 @@ func eventLogin(e timelineEvent) string {
 // comments, and (for a PR) the changed file paths. Every field is bounded so the
 // untrusted content stays capped and the prompt small.
 type Discussion struct {
-	Body         string
-	Comments     []Comment
-	ChangedFiles []string
+	Body           string
+	Comments       []Comment // issue-tab comments: the general discussion thread
+	Reviews        []Review  // PR review submissions: state + summary body (PRs only)
+	ReviewComments []Comment // inline review comments on the diff (PRs only)
+	ChangedFiles   []string
 }
 
-// Comment is one comment in an item's discussion.
+// Comment is one comment in an item's discussion, or an inline review comment.
 type Comment struct {
 	Author string
+	Body   string
+	At     time.Time
+}
+
+// Review is one PR review submission: its state and summary body. The inline
+// comments a reviewer left with it live in Discussion.ReviewComments.
+type Review struct {
+	Author string
+	State  string // approved | changes_requested | commented | dismissed
 	Body   string
 	At     time.Time
 }
@@ -411,8 +422,8 @@ const (
 )
 
 // Discussion fetches an item's description, its recent comments, and (for PRs)
-// its changed file paths using the user's vended token. The body and comments
-// are attacker-influenceable, so each is truncated and the counts capped; the
+// its reviews, inline review comments, and changed file paths using the user's
+// vended token. The body and comments are attacker-influenceable, so each is truncated and the counts capped; the
 // caller frames the result as untrusted data (docs/adr/0019). Only the
 // description is required: missing comments or files degrade gracefully. A repo
 // the read-only token cannot see surfaces as an error the caller treats as "no
@@ -458,6 +469,64 @@ func (c *Client) Discussion(ctx context.Context, token, repo string, number int,
 
 	// Changed file paths for PRs are best-effort and low-risk (paths, not patch).
 	if isPR {
+		// PR review submissions: state + summary body. Best-effort.
+		if body, err := c.get(ctx, token, fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100", repo, number)); err == nil {
+			var raw []struct {
+				Body  string `json:"body"`
+				State string `json:"state"`
+				User  *struct {
+					Login string `json:"login"`
+				} `json:"user"`
+				SubmittedAt time.Time `json:"submitted_at"`
+			}
+			if err := json.Unmarshal(body, &raw); err == nil {
+				if len(raw) > maxDiscussionComments {
+					raw = raw[len(raw)-maxDiscussionComments:] // keep the most recent
+				}
+				for _, rv := range raw {
+					// Skip empty "commented" reviews: they are just containers for the
+					// inline comments fetched below and carry no signal of their own.
+					if strings.TrimSpace(rv.Body) == "" && strings.EqualFold(rv.State, "commented") {
+						continue
+					}
+					r := Review{State: strings.ToLower(rv.State), Body: truncateRunes(rv.Body, maxCommentBody), At: rv.SubmittedAt}
+					if rv.User != nil {
+						r.Author = rv.User.Login
+					}
+					d.Reviews = append(d.Reviews, r)
+				}
+			}
+		}
+
+		// Inline review comments on the diff (path-prefixed). Best-effort.
+		if body, err := c.get(ctx, token, fmt.Sprintf("/repos/%s/pulls/%d/comments?per_page=100", repo, number)); err == nil {
+			var raw []struct {
+				Body string `json:"body"`
+				Path string `json:"path"`
+				User *struct {
+					Login string `json:"login"`
+				} `json:"user"`
+				CreatedAt time.Time `json:"created_at"`
+			}
+			if err := json.Unmarshal(body, &raw); err == nil {
+				if len(raw) > maxDiscussionComments {
+					raw = raw[len(raw)-maxDiscussionComments:] // keep the most recent
+				}
+				for _, cm := range raw {
+					text := cm.Body
+					if cm.Path != "" {
+						text = "[" + cm.Path + "] " + cm.Body
+					}
+					cc := Comment{Body: truncateRunes(text, maxCommentBody), At: cm.CreatedAt}
+					if cm.User != nil {
+						cc.Author = cm.User.Login
+					}
+					d.ReviewComments = append(d.ReviewComments, cc)
+				}
+			}
+		}
+
+		// Changed file paths are best-effort and low-risk (paths, not patch).
 		if body, err := c.get(ctx, token, fmt.Sprintf("/repos/%s/pulls/%d/files?per_page=100", repo, number)); err == nil {
 			var files []struct {
 				Filename string `json:"filename"`

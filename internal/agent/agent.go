@@ -523,17 +523,42 @@ func formatDiscussion(d github.Discussion) string {
 			fmt.Fprintf(&b, "- %s\n", f)
 		}
 	}
+	if len(d.Reviews) > 0 {
+		fmt.Fprintf(&b, "\nReviews (%d most recent):\n", len(d.Reviews))
+		for _, r := range d.Reviews {
+			state := r.State
+			if state == "" {
+				state = "reviewed"
+			}
+			if r.Body != "" {
+				fmt.Fprintf(&b, "- %s [%s]: %s\n", commentAuthor(r.Author), state, r.Body)
+			} else {
+				fmt.Fprintf(&b, "- %s [%s]\n", commentAuthor(r.Author), state)
+			}
+		}
+	}
+	if len(d.ReviewComments) > 0 {
+		fmt.Fprintf(&b, "\nReview comments (%d most recent):\n", len(d.ReviewComments))
+		for _, c := range d.ReviewComments {
+			fmt.Fprintf(&b, "- %s: %s\n", commentAuthor(c.Author), c.Body)
+		}
+	}
 	if len(d.Comments) > 0 {
 		fmt.Fprintf(&b, "\nDiscussion (%d most recent comments):\n", len(d.Comments))
 		for _, c := range d.Comments {
-			author := c.Author
-			if author == "" {
-				author = "someone"
-			}
-			fmt.Fprintf(&b, "- %s: %s\n", author, c.Body)
+			fmt.Fprintf(&b, "- %s: %s\n", commentAuthor(c.Author), c.Body)
 		}
 	}
 	return b.String()
+}
+
+// commentAuthor falls back to a neutral label when GitHub omits the author
+// (e.g. a deleted account), keeping the rendered line well-formed.
+func commentAuthor(a string) string {
+	if a == "" {
+		return "someone"
+	}
+	return a
 }
 
 // runResearch is the github-research runtime: it re-weights one item's ranking
