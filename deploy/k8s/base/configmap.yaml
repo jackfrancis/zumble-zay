@@ -26,8 +26,12 @@ data:
   # (local, tests, CI). "agent-sandbox" runs each job as a kubernetes-sigs
   # agent-sandbox Sandbox for gVisor/Kata isolation (ADR 0026) — an OPTIONAL
   # substrate compiled in only with `-tags agent_sandbox`; it also needs the
-  # agent-sandbox controller + CRDs installed and the sandboxes RBAC rule. An
-  # unknown (or not-compiled-in) value fails fast at startup.
+  # agent-sandbox controller + CRDs installed and the sandboxes RBAC rule.
+  # "opensandbox" runs each job as an OpenSandbox sandbox through a remote
+  # OpenSandbox lifecycle server (ADR 0027): set OPENSANDBOX_ENDPOINT (e.g.
+  # https://opensandbox:8443/v1) and the OPENSANDBOX_API_KEY secret; it needs no
+  # launcher RBAC, since OpenSandbox schedules the workload itself. An unknown (or
+  # not-compiled-in) value fails fast at startup.
   LAUNCHER: "k8s-job"
   # Out-of-process runtime settings, used by the orchestrator when LAUNCHER is
   # k8s-job or k8s-pod. These have code defaults; override per environment.

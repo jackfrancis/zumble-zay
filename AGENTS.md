@@ -216,7 +216,13 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    **token-exchange** endpoint (`POST /control/token`) for service runtimes
    (kagent) that pull a per-job token. The remaining substrate launchers are
    additive TODOs; the four in-cluster launchers plus `agent-sandbox` are the
-   references.
+   references. **DONE — `opensandbox` (ADR 0027):** `internal/opensandbox` is the
+   first *remote-control-plane* substrate — a hand-rolled `net/http` client of an
+   OpenSandbox lifecycle server (no new module, no build tag, no ZZ RBAC; the
+   endpoint + API key are read in `build()` from `OPENSANDBOX_ENDPOINT`/
+   `OPENSANDBOX_API_KEY`, so `internal/config` is untouched), detached +
+   callback completion (ADR 0025) with the job deadline mapped onto the sandbox
+   self-reap timeout; it reuses the shared `runtimespec.Env` injection map.
    Runtimes report terminal completion (`POST /agent/complete`) which the
    orchestrator races against the launcher watch (ADR 0025), so the k8s launcher
    is callback-driven with no code change. Remaining: per-service caller identity

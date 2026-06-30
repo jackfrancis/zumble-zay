@@ -30,12 +30,15 @@ type Options struct {
 	AITokenSecretKey  string // key within that Secret
 }
 
-// EnvVars builds the injection-contract environment for the runtime container
-// from the job spec and its minted token (docs/adr/0012). The ranking-model token
-// is a secret, so it is appended by Secret reference rather than as a plain value,
-// so it never appears in the workload spec.
-func EnvVars(opts Options, spec orchestrator.JobSpec, token string) []corev1.EnvVar {
-	env := agent.Env(agent.RunParams{
+// Env builds the substrate-neutral ZZ_* injection map from the job spec and its
+// minted token (docs/adr/0012). It is the contract every substrate emits: the
+// Kubernetes launchers wrap it as container env (EnvVars), while a remote-control-
+// plane substrate (e.g. opensandbox, docs/adr/0027) forwards the map straight to
+// its create API. The ranking-model token is deliberately absent — it is a secret
+// a launcher injects out-of-band (a Secret reference in cluster; a credential
+// path remotely), so it never rides this shared map.
+func Env(opts Options, spec orchestrator.JobSpec, token string) map[string]string {
+	return agent.Env(agent.RunParams{
 		JobType:       string(spec.Type),
 		BaseURL:       opts.ZZBaseURL,
 		Token:         token,
@@ -45,6 +48,14 @@ func EnvVars(opts Options, spec orchestrator.JobSpec, token string) []corev1.Env
 		AIEndpoint:    opts.AIEndpoint,
 		AIModel:       opts.AIModel,
 	})
+}
+
+// EnvVars builds the injection-contract environment for the runtime container
+// from the job spec and its minted token (docs/adr/0012). The ranking-model token
+// is a secret, so it is appended by Secret reference rather than as a plain value,
+// so it never appears in the workload spec.
+func EnvVars(opts Options, spec orchestrator.JobSpec, token string) []corev1.EnvVar {
+	env := Env(opts, spec, token)
 	envVars := make([]corev1.EnvVar, 0, len(env)+1)
 	for k, v := range env {
 		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})

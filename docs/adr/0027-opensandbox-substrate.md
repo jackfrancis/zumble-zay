@@ -1,8 +1,8 @@
 # ADR 0027: OpenSandbox as a remote-control-plane substrate
 
-Status: Proposed — 2026-06-30. This record **reserves the number** and captures
-the design direction; the full decision (and its validation) lands with the
-implementation.
+Status: Accepted — 2026-06-30. Implemented in `internal/opensandbox` (launcher,
+hand-rolled lifecycle client, tests); not yet validated against a live OpenSandbox
+server.
 
 Builds on [0012](0012-kubernetes-native-substrates-swappable.md) (substrates are
 swappable behind `orchestrator.Launcher`), [0024](0024-agent-runtime-portability.md)
@@ -29,7 +29,7 @@ the canonical fully-detached substrate, and both ride the same detached +
 callback completion path, so the seam and the concurrent-work conventions
 (AGENTS.md) are the things to protect.
 
-## Decision (proposed direction)
+## Decision
 
 - **Own package, own activation.** A new `internal/opensandbox` implements
   `orchestrator.Launcher` + `AsyncLauncher`, registers itself
