@@ -1,0 +1,29 @@
+# Shell-bearing agent runtime image for the OpenSandbox substrate (docs/adr/0027).
+# OpenSandbox runs the runtime via `sh -c` inside a keep-alive container and keeps
+# that container alive with `tail -f /dev/null`, so — unlike the distroless
+# Dockerfile.runtime — the sandbox image must carry a shell and coreutils. Same
+# /runtime binary, on a minimal glibc base. Builds identically under docker and
+# podman (no BuildKit-only features).
+
+# ---- build stage ----
+FROM golang:1.25 AS build
+WORKDIR /src
+
+# Cache dependencies first.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Build a static, stripped binary (CGO off, so it runs on any base).
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/runtime ./cmd/runtime
+
+# ---- runtime stage ----
+# debian-slim carries bash + coreutils (the `tail` keep-alive and the `sh -c`
+# OpenSandbox uses to exec the runtime) and ships CA certs for the outbound HTTPS
+# calls back to ZZ and to the providers. The job is configured entirely via the
+# ZZ_* environment contract, delivered as the exec command env (docs/adr/0027).
+FROM debian:stable-slim
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/runtime /runtime

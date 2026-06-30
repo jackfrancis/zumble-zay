@@ -90,6 +90,16 @@ exec** instead.
   key), the shell-bearing runtime image available to the OpenSandbox runtime, and
   an egress allowlist permitting the sandbox to reach ZZ's web tier (so vend/ingest
   and the completion callback land) plus the AI endpoint.
+- **Dev (kind): `LAUNCHER=opensandbox make dev-up`.** Experimental and additive
+  (a bare `make dev-up` is byte-identical): it builds + loads the shell-bearing
+  runtime image (`Dockerfile.runtime-shell`), clones a pinned OpenSandbox checkout
+  and `helm install`s the controller + lifecycle server (Kubernetes runtime,
+  `batchsandbox` provider, a dev API key, the charts' default published images),
+  and sets the orchestrator's `OPENSANDBOX_*` env plus a cross-namespace
+  `RUNTIME_ZZ_BASE_URL` (sandboxes run in the OpenSandbox namespace, not the web
+  tier's). `helm`/`git` are required; `AI_TOKEN` is left to the user (no Secret
+  reference), so ranking falls back to the stub until set. Not yet validated
+  end-to-end — expect to tune image pulls and the batchsandbox template per cluster.
 - **Merge-clean with ADR 0028 (ray/kuberay).** By staying in its own package +
   blank-import file, reading its config in `build()`, adding no RBAC, and adding
   no module, this substrate shares only trivial textual surfaces (the configmap

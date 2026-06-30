@@ -1,7 +1,8 @@
 .PHONY: build run test tidy vet fmt clean image image-save kind-load engine \
         cluster-up cluster-down dev-up dev-down dev-forward dev-logs dev-logs-orchestrator \
         build-runtime image-runtime image-runtime-save kind-load-runtime \
-        build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer
+        build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer \
+        image-runtime-shell image-runtime-shell-save kind-load-runtime-shell opensandbox-install
 
 BIN := bin/server
 
@@ -41,6 +42,24 @@ ORCHESTRATOR_GO_TAGS = $(strip $(ORCHESTRATOR_GO_TAGS_LIST))
 ORCHESTRATOR_GO_TAGS_LIST += $(if $(filter agent-sandbox,$(LAUNCHER)),agent_sandbox,)
 # Pinned agent-sandbox release for the optional controller + CRDs install.
 AGENT_SANDBOX_VERSION ?= v0.5.0
+
+# Shell-bearing runtime image for the OpenSandbox substrate (docs/adr/0027): the
+# same /runtime binary on a base with a shell + coreutils, since OpenSandbox runs
+# the runtime via `sh -c` inside a keep-alive container (the distroless runtime
+# image cannot run there).
+RUNTIME_SHELL_IMAGE ?= localhost/zumble-zay-runtime-shell:dev
+# OpenSandbox (LAUNCHER=opensandbox) dev-install knobs — all overridable. The
+# server Helm chart installs from local source, so a pinned checkout is cloned
+# under build/. EXPERIMENTAL: this stands up the full OpenSandbox platform
+# (controller + server, default published images the cluster pulls) and is not yet
+# validated end-to-end; expect to tune image pulls / the batchsandbox template per
+# cluster. helm + git are required. OPENSANDBOX_REF takes a branch or tag.
+OPENSANDBOX_REF ?= main
+OPENSANDBOX_NAMESPACE ?= opensandbox-system
+OPENSANDBOX_API_KEY ?= zumble-zay-dev
+OPENSANDBOX_EXECD_IMAGE ?= sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20
+OPENSANDBOX_EGRESS_IMAGE ?= sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3
+OPENSANDBOX_CLONE_DIR := build/opensandbox
 
 # Vendored GitHub Primer CSS (the UI's design system, served from the binary).
 # `make vendor-primer` refreshes these at the pinned versions; bump the versions
@@ -142,6 +161,39 @@ kind-load-runtime: image-runtime-save
 	kind load image-archive zumble-zay-runtime-image.tar --name $(KIND_CLUSTER)
 	rm -f zumble-zay-runtime-image.tar
 
+# Build the shell-bearing runtime image for the OpenSandbox substrate (docs/adr/0027).
+image-runtime-shell: engine
+	$(CONTAINER_ENGINE) build -f Dockerfile.runtime-shell -t $(RUNTIME_SHELL_IMAGE) .
+
+# Export the shell runtime image to a portable archive.
+image-runtime-shell-save: image-runtime-shell
+	$(CONTAINER_ENGINE) save $(RUNTIME_SHELL_IMAGE) -o zumble-zay-runtime-shell-image.tar
+
+# Load the shell runtime image into kind so OpenSandbox sandboxes resolve it
+# without a registry pull. Run before exercising LAUNCHER=opensandbox (docs/adr/0027).
+kind-load-runtime-shell: image-runtime-shell-save
+	kind load image-archive zumble-zay-runtime-shell-image.tar --name $(KIND_CLUSTER)
+	rm -f zumble-zay-runtime-shell-image.tar
+
+# EXPERIMENTAL (docs/adr/0027): install the OpenSandbox platform into the kind
+# cluster so LAUNCHER=opensandbox has a control plane to drive. Clones a pinned
+# OpenSandbox checkout (the server chart installs from local source), then helm
+# installs the controller (CRDs + operator) and the lifecycle server configured for
+# the Kubernetes runtime + batchsandbox provider with a dev API key, using the
+# charts' default published images (the cluster pulls them). Not yet validated
+# end-to-end; the OPENSANDBOX_* knobs above are overridable.
+opensandbox-install:
+	@command -v helm >/dev/null || { echo "helm not installed (https://helm.sh)"; exit 1; }
+	rm -rf $(OPENSANDBOX_CLONE_DIR)
+	git clone --depth 1 --branch $(OPENSANDBOX_REF) https://github.com/opensandbox-group/OpenSandbox $(OPENSANDBOX_CLONE_DIR)
+	@kubectl create namespace $(OPENSANDBOX_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+	helm upgrade --install opensandbox-controller $(OPENSANDBOX_CLONE_DIR)/kubernetes/charts/opensandbox-controller \
+		--namespace $(OPENSANDBOX_NAMESPACE) --wait --timeout 300s
+	@printf 'server:\n  replicaCount: 1\nconfigToml: |\n  [server]\n  host = "0.0.0.0"\n  port = 80\n  api_key = "%s"\n  [log]\n  level = "INFO"\n  [runtime]\n  type = "kubernetes"\n  execd_image = "%s"\n  [kubernetes]\n  namespace = "%s"\n  workload_provider = "batchsandbox"\n  batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"\n  [egress]\n  image = "%s"\n  mode = "dns+nft"\n' \
+		"$(OPENSANDBOX_API_KEY)" "$(OPENSANDBOX_EXECD_IMAGE)" "$(OPENSANDBOX_NAMESPACE)" "$(OPENSANDBOX_EGRESS_IMAGE)" > $(OPENSANDBOX_CLONE_DIR)/zz-server-values.yaml
+	helm upgrade --install opensandbox-server $(OPENSANDBOX_CLONE_DIR)/kubernetes/charts/opensandbox-server \
+		--namespace $(OPENSANDBOX_NAMESPACE) -f $(OPENSANDBOX_CLONE_DIR)/zz-server-values.yaml --wait --timeout 300s
+
 # Export the orchestrator image to a portable archive (docs/adr/0023).
 image-orchestrator-save: image-orchestrator
 	$(CONTAINER_ENGINE) save $(ORCHESTRATOR_IMAGE) -o zumble-zay-orchestrator-image.tar
@@ -188,6 +240,13 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 		kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$(AGENT_SANDBOX_VERSION)/manifest.yaml; \
 		kubectl wait --for=condition=Established crd/sandboxes.agents.x-k8s.io --timeout=60s || true; \
 	fi
+	# Optional OpenSandbox substrate (docs/adr/0027): load the shell-bearing runtime
+	# image and install the OpenSandbox platform so the orchestrator has a control
+	# plane to drive. Only when selected. EXPERIMENTAL — see opensandbox-install.
+	@if [ "$(LAUNCHER)" = "opensandbox" ]; then \
+		echo "loading shell runtime image + installing OpenSandbox (experimental)"; \
+		$(MAKE) kind-load-runtime-shell opensandbox-install; \
+	fi
 	kubectl apply -k deploy/k8s/overlays/dev
 	# Select the launcher on the orchestrator when it differs from the ConfigMap
 	# default (k8s-job): an explicit container env wins over envFrom, so this
@@ -195,6 +254,19 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	@if [ "$(LAUNCHER)" != "k8s-job" ]; then \
 		echo "selecting LAUNCHER=$(LAUNCHER) on the orchestrator"; \
 		kubectl -n $(KUBE_NS) set env deploy/zumble-zay-orchestrator LAUNCHER=$(LAUNCHER); \
+	fi
+	# OpenSandbox needs more than the launcher name: the endpoint + API key to reach
+	# the OpenSandbox server, the shell-bearing runtime image, and a cross-namespace
+	# ZZ base URL (sandboxes run in the OpenSandbox namespace, not the web tier's).
+	# The model token is NOT wired here — OpenSandbox cannot use a Secret reference,
+	# so set AI_TOKEN on the orchestrator yourself to enable LLM ranking; without it
+	# the runtime falls back to the stub ranker (docs/adr/0027).
+	@if [ "$(LAUNCHER)" = "opensandbox" ]; then \
+		kubectl -n $(KUBE_NS) set env deploy/zumble-zay-orchestrator \
+			OPENSANDBOX_ENDPOINT=http://opensandbox-server.$(OPENSANDBOX_NAMESPACE).svc:80/v1 \
+			OPENSANDBOX_API_KEY=$(OPENSANDBOX_API_KEY) \
+			OPENSANDBOX_RUNTIME_IMAGE=$(RUNTIME_SHELL_IMAGE) \
+			RUNTIME_ZZ_BASE_URL=http://zumble-zay.$(KUBE_NS).svc.cluster.local:8080; \
 	fi
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is

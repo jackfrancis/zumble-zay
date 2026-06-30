@@ -1,8 +1,10 @@
 # Build artifacts
 /bin/
+/build/
 /dist/
 *.exe
 *.out
+*.tar
 
 # Local environment / secrets
 .env
