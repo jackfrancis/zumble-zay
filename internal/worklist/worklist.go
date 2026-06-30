@@ -137,6 +137,13 @@ type Signals struct {
 	// Relationship to the acting user (why it's on the radar).
 	Reasons       []Reason `json:"reasons,omitempty"`        // review_requested | assignee | author | ...
 	RelatedActive []string `json:"related_active,omitempty"` // IDs of my active items this overlaps
+	// ReviewRequestedBy is the GitHub login that requested the user's review (the
+	// actor of the latest pending review-request); empty when none is pending. ZZ
+	// derives ReviewRequestedByBot from it against the configured bot list, so an
+	// automated assignment (e.g. CI assigning code owners) is not mistaken for an
+	// explicit human request (docs/adr/0015).
+	ReviewRequestedBy    string `json:"review_requested_by,omitempty"`
+	ReviewRequestedByBot bool   `json:"review_requested_by_bot,omitempty"`
 
 	// Engagement / heat.
 	Comments          int     `json:"comments"`

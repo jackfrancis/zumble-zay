@@ -18,12 +18,23 @@ const maxIngestBytes = 4 << 20 // 4 MiB
 // persists them. This is the write counterpart to the read-only GET
 // /api/worklist (see docs/adr/0006).
 type IngestHandler struct {
-	store worklist.Store
+	store        worklist.Store
+	botReviewers map[string]struct{} // logins whose review requests are automated (docs/adr/0015)
 }
 
-// NewIngestHandler constructs an IngestHandler over the given store.
-func NewIngestHandler(store worklist.Store) *IngestHandler {
-	return &IngestHandler{store: store}
+// NewIngestHandler constructs an IngestHandler over the given store. botReviewers
+// are GitHub logins whose review requests are automated (e.g. "k8s-ci-robot"), so
+// a review they requested is marked agent-derived rather than an explicit human
+// ask; the bot-policy is applied here, in ZZ core, so the runtime stays free of
+// it (docs/adr/0015).
+func NewIngestHandler(store worklist.Store, botReviewers []string) *IngestHandler {
+	bots := make(map[string]struct{}, len(botReviewers))
+	for _, b := range botReviewers {
+		if b != "" {
+			bots[b] = struct{}{}
+		}
+	}
+	return &IngestHandler{store: store, botReviewers: bots}
 }
 
 type ingestRequest struct {
@@ -90,6 +101,11 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		// foundation. A github-ingest sends no research; enrich/rank round-trip the
 		// stored value, so this is a no-op for them.
 		req.Items[i].Signals.Research = prevResearch[req.Items[i].ID]
+		// Bot-reviewer policy (ZZ core, docs/adr/0015): a review requested by an
+		// automated account (e.g. k8s-ci-robot) is not an explicit human ask, so
+		// flag it for the ranker. Derived here so the runtime stays policy-free.
+		_, isBotReview := h.botReviewers[req.Items[i].Signals.ReviewRequestedBy]
+		req.Items[i].Signals.ReviewRequestedByBot = isBotReview
 		// The ingesting runtime is authoritative for completion: a github-ingest
 		// sends open items (zero, which revives a reopened item), while the ingest
 		// runtime stamps a confirmed close/merge (docs/adr/0017). Capture it before

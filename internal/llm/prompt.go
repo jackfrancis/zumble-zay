@@ -15,10 +15,10 @@ import (
 const systemPrompt = `You rank a software engineer's GitHub work items for a personal "what needs my attention" radar.
 
 Score the item on four axes, each a number from 0.0 to 1.0:
-- relevance: how much this item needs the user's OWN attention right now. High when a review was explicitly requested of them, it is their own PR, or their username is directly mentioned (they are wanted specifically). A bare assignment they have not yet engaged with (no requested review, no mention) is only MEDIUM. It drops to LOW when "others_reviewing" is set (other reviewers are already handling it) or "waiting_on_others" is set (the user has already acted, or a review has landed and progress is on the author or a third party) — it is not actionable by the user right now. A direct mention keeps relevance high even when others are engaged.
+- relevance: how much this item needs the user's OWN attention right now. High when a review was explicitly requested of them, it is their own PR, or their username is directly mentioned (they are wanted specifically). A bare assignment they have not yet engaged with (no requested review, no mention) is only MEDIUM. It drops to LOW when "others_reviewing" is set (other reviewers are already handling it) or "waiting_on_others" is set (the user has already acted, or a review has landed and progress is on the author or a third party) — it is not actionable by the user right now. A direct mention keeps relevance high even when others are engaged. A review counts as explicitly requested only when a human asked: if "review_auto_assigned" is set, a bot auto-assigned the user (e.g. CI assigning code owners), so treat it like a bare assignment (MEDIUM), not an explicit request.
 - impact: how consequential the underlying change is (release-blocking bugs, security, broad blast radius, important areas score high; trivial or cosmetic score low).
 - engagement: how much active collaboration is happening (comments, distinct participants, reactions, cross-references).
-- urgency: how time-sensitive it is FOR THE USER (they have been blocking others for a while, a deadline is near, or it is going stale). If "waiting_on_others" is set, the ball is not in the user's court and there is no time pressure on them, so urgency is ~0. If "others_reviewing" is set and no review was requested of the user, urgency is low — someone else is driving it.
+- urgency: how time-sensitive it is FOR THE USER (they have been blocking others for a while, a deadline is near, or it is going stale). If "waiting_on_others" is set, the ball is not in the user's court and there is no time pressure on them, so urgency is ~0. If "others_reviewing" is set and no review was requested of the user, urgency is low — someone else is driving it. If "review_auto_assigned" is set, the user was not personally asked — a bot assigned them — so there is no awaiting-me pressure and urgency stays low.
 
 Also return:
 - confidence: 0.0 to 1.0, how sure you are given the limited signals. Be honest; low signal means low confidence.
@@ -50,7 +50,7 @@ func userPrompt(item worklist.WorkItem) string {
 		"inbound_refs": item.Signals.InboundRefs,
 		"age_days":     daysSince(item.GitHub.UpdatedAt, now),
 	}
-	if !item.Signals.AwaitingMeSince.IsZero() {
+	if !item.Signals.AwaitingMeSince.IsZero() && !item.Signals.ReviewRequestedByBot {
 		summary["awaiting_me_days"] = daysSince(item.Signals.AwaitingMeSince, now)
 	}
 	if !item.Signals.AwaitingOthersSince.IsZero() {
@@ -64,6 +64,12 @@ func userPrompt(item worklist.WorkItem) string {
 		// Someone else is already reviewing: the user's own attention is less
 		// needed unless they were specifically asked or mentioned (docs/adr/0015).
 		summary["others_reviewing"] = item.Signals.OtherReviewers
+	}
+	if item.Signals.ReviewRequestedByBot {
+		// The review was auto-requested by a bot (e.g. CI assigning code owners),
+		// not explicitly by a human, so it is a bare assignment rather than an
+		// explicit ask (docs/adr/0015).
+		summary["review_auto_assigned"] = true
 	}
 	if !item.Signals.DeadlineAt.IsZero() {
 		summary["deadline_in_days"] = daysSince(now, item.Signals.DeadlineAt)

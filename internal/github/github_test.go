@@ -319,3 +319,28 @@ func TestItemState(t *testing.T) {
 		})
 	}
 }
+
+// TestItemActivityReportsReviewRequester records who requested the user's pending
+// review (the actor), so ZZ can later tell a bot auto-assignment from a human ask.
+func TestItemActivityReportsReviewRequester(t *testing.T) {
+	const me = "octocat"
+	body := `[
+	  {"event":"review_requested","created_at":"2026-06-20T10:00:00Z","actor":{"login":"k8s-ci-robot"},"requested_reviewer":{"login":"octocat"}}
+	]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.Client(), srv.URL)
+	act, err := c.ItemActivity(context.Background(), "tok", "octo/repo", 1, me)
+	if err != nil {
+		t.Fatalf("ItemActivity: %v", err)
+	}
+	if act.AwaitingMeSince.IsZero() {
+		t.Fatalf("awaiting-me should be set (pending request)")
+	}
+	if act.RequestedByLogin != "k8s-ci-robot" {
+		t.Errorf("requested_by = %q, want k8s-ci-robot", act.RequestedByLogin)
+	}
+}

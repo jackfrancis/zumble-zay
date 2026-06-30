@@ -49,7 +49,7 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, v
 	// (POST /agent/worklist).
 	worklistHandler := api.NewWorklistHandler(store, cp)
 	credentialHandler := api.NewCredentialHandler(authH)
-	ingestHandler := api.NewIngestHandler(store)
+	ingestHandler := api.NewIngestHandler(store, cfg.BotReviewers)
 	// The assistive conversation runs as an ephemeral converse runtime spawned by
 	// the orchestrator (docs/adr/0019); the HTTP layer only enqueues turns. It is
 	// available when a chat model is configured.

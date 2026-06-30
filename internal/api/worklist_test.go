@@ -172,7 +172,7 @@ func TestWorklistRescoresFromSignalsAtReadTime(t *testing.T) {
 // rescore, and a later open re-ingest (a reopen) clears it so the item revives.
 func TestIngestPreservesAndClearsCompletedAt(t *testing.T) {
 	store := worklist.NewMemoryStore()
-	h := NewIngestHandler(store)
+	h := NewIngestHandler(store, nil)
 	done := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
 
 	post := func(it worklist.WorkItem) {
@@ -204,6 +204,42 @@ func TestIngestPreservesAndClearsCompletedAt(t *testing.T) {
 	}
 }
 
+// TestIngestFlagsBotRequestedReviews proves the bot-reviewer policy is applied in
+// ZZ core: a review requested by a configured bot is flagged, a human's is not.
+func TestIngestFlagsBotRequestedReviews(t *testing.T) {
+	store := worklist.NewMemoryStore()
+	h := NewIngestHandler(store, []string{"k8s-ci-robot"})
+
+	post := func(id, requester string) worklist.WorkItem {
+		t.Helper()
+		it := worklist.WorkItem{ID: id, Source: "github", Signals: worklist.Signals{ReviewRequestedBy: requester}}
+		body, _ := json.Marshal(map[string]any{"items": []worklist.WorkItem{it}})
+		req := httptest.NewRequest(http.MethodPost, "/agent/worklist", bytes.NewReader(body))
+		p := &principal.Principal{Kind: principal.KindUser, Subject: "u1", ActingUserID: "u1", Scopes: []principal.Scope{principal.ScopeAll}}
+		req = req.WithContext(principal.NewContext(req.Context(), p))
+		rec := httptest.NewRecorder()
+		h.Ingest(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("ingest status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		got, _ := store.List(context.Background(), "u1")
+		for _, w := range got {
+			if w.ID == id {
+				return w
+			}
+		}
+		t.Fatalf("item %s not stored", id)
+		return worklist.WorkItem{}
+	}
+
+	if w := post("bot", "k8s-ci-robot"); !w.Signals.ReviewRequestedByBot {
+		t.Errorf("a bot-requested review should be flagged, got %+v", w.Signals)
+	}
+	if w := post("human", "alice"); w.Signals.ReviewRequestedByBot {
+		t.Errorf("a human-requested review must not be flagged, got %+v", w.Signals)
+	}
+}
+
 func TestAgentWorklistListReturnsStoredItemsRaw(t *testing.T) {
 	store := worklist.NewMemoryStore()
 	// Stored with a non-trivial rank; the agent read must return it verbatim,
@@ -213,7 +249,7 @@ func TestAgentWorklistListReturnsStoredItemsRaw(t *testing.T) {
 		Signals: worklist.Signals{Reasons: []worklist.Reason{worklist.ReasonReviewRequested}},
 		Meta:    worklist.Metadata{Rank: 0.42, Origin: worklist.OriginAgent},
 	})
-	h := NewIngestHandler(store)
+	h := NewIngestHandler(store, nil)
 
 	rec := httptest.NewRecorder()
 	h.List(rec, authedRequest("/agent/worklist", "u1"))
@@ -242,7 +278,7 @@ func TestAgentWorklistListLimitReturnsTopByRank(t *testing.T) {
 		worklist.WorkItem{ID: "high", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.9, Origin: worklist.OriginAgent}},
 		worklist.WorkItem{ID: "mid", OwnerID: "u1", Meta: worklist.Metadata{Rank: 0.5, Origin: worklist.OriginAgent}},
 	)
-	h := NewIngestHandler(store)
+	h := NewIngestHandler(store, nil)
 
 	rec := httptest.NewRecorder()
 	h.List(rec, authedRequest("/agent/worklist?limit=2", "u1"))

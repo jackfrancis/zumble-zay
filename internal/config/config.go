@@ -29,6 +29,13 @@ type Config struct {
 	Runtime RuntimeConfig
 	// AI configures the chat-model ranker used by llm-rank jobs (docs/adr/0011).
 	AI AIConfig
+	// BotReviewers are GitHub logins whose review requests are automated rather
+	// than a human explicitly asking — e.g. Prow's "k8s-ci-robot" auto-assigning
+	// code owners. ZZ treats a review requested by one of these as a bare
+	// assignment, not an explicit request, so it does not inflate the radar
+	// (docs/adr/0015). Configurable via BOT_REVIEWERS (comma-separated); defaults
+	// to k8s-ci-robot.
+	BotReviewers []string
 	// MintPrivateKey is the Ed25519 key that signs job tokens. Only the
 	// orchestrator — the sole token issuer (docs/adr/0023) — needs it; it is nil
 	// in a web tier configured with only a public key.
@@ -103,6 +110,13 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// Review requests from these logins are automated, not explicit human asks;
+	// default to Prow's bot so the common Kubernetes case works out of the box.
+	botReviewers := splitAndTrim(os.Getenv("BOT_REVIEWERS"))
+	if len(botReviewers) == 0 {
+		botReviewers = []string{"k8s-ci-robot"}
+	}
+
 	cfg := &Config{
 		Addr:           getEnv("ADDR", ":8080"),
 		BaseURL:        strings.TrimRight(getEnv("BASE_URL", "http://localhost:8080"), "/"),
@@ -131,6 +145,7 @@ func Load() (*Config, error) {
 			ZZBaseURL:      getEnv("RUNTIME_ZZ_BASE_URL", "http://zumble-zay:8080"),
 			ServiceAccount: os.Getenv("RUNTIME_SERVICE_ACCOUNT"),
 		},
+		BotReviewers: botReviewers,
 		AI: AIConfig{
 			Endpoint:        os.Getenv("AI_ENDPOINT"),
 			Model:           os.Getenv("AI_MODEL"),

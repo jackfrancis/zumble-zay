@@ -269,6 +269,7 @@ type Activity struct {
 	OtherReviewers      int       // distinct reviewers other than login (someone else is engaged)
 	AwaitingMeSince     time.Time // when login was asked to review with no engagement since; zero if none
 	AwaitingOthersSince time.Time // when the ball is in others' court (login had the last word, or a decisive review landed); zero if none
+	RequestedByLogin    string    // who requested login's pending review (the actor); empty when none is pending
 }
 
 // ItemActivity reads one page of the issue/PR timeline and derives the
@@ -285,9 +286,11 @@ func (c *Client) ItemActivity(ctx context.Context, token, repo string, number in
 	// requestedAt: latest review explicitly requested of login. myLastActivityAt:
 	// latest comment or review by login. lastActor/lastActivityAt: the most recent
 	// voice on the thread, and lastActivityDecisive records whether that voice was
-	// a formal review (changes requested / approved).
+	// a formal review (changes requested / approved). requestedByLogin: who made
+	// the latest review request of login (the actor), so ZZ can tell an automated
+	// assignment from an explicit human ask.
 	var requestedAt, myLastActivityAt, lastActivityAt time.Time
-	var lastActor string
+	var lastActor, requestedByLogin string
 	var lastActivityDecisive bool
 	for _, e := range events {
 		switch e.Event {
@@ -329,6 +332,7 @@ func (c *Client) ItemActivity(ctx context.Context, token, repo string, number in
 		case "review_requested":
 			if e.RequestedReviewer != nil && e.RequestedReviewer.Login == login && e.CreatedAt.After(requestedAt) {
 				requestedAt = e.CreatedAt
+				requestedByLogin = eventLogin(e)
 			}
 		}
 	}
@@ -352,6 +356,7 @@ func (c *Client) ItemActivity(ctx context.Context, token, repo string, number in
 	switch {
 	case meSince.After(othersSince):
 		a.AwaitingMeSince = meSince
+		a.RequestedByLogin = requestedByLogin
 	case !othersSince.IsZero():
 		a.AwaitingOthersSince = othersSince
 	}

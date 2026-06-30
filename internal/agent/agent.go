@@ -356,12 +356,14 @@ func runEnrich(ctx context.Context, p RunParams) error {
 			s := &items[i].Signals
 			if act.Participants == s.Participants && act.InboundRefs == s.InboundRefs &&
 				act.OtherReviewers == s.OtherReviewers &&
+				act.RequestedByLogin == s.ReviewRequestedBy &&
 				act.AwaitingMeSince.Equal(s.AwaitingMeSince) && act.AwaitingOthersSince.Equal(s.AwaitingOthersSince) {
 				return
 			}
 			s.Participants = act.Participants
 			s.InboundRefs = act.InboundRefs
 			s.OtherReviewers = act.OtherReviewers
+			s.ReviewRequestedBy = act.RequestedByLogin
 			s.AwaitingMeSince = act.AwaitingMeSince
 			s.AwaitingOthersSince = act.AwaitingOthersSince
 			mu.Lock()
