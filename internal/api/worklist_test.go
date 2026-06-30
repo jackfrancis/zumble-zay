@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -163,6 +164,43 @@ func TestWorklistRescoresFromSignalsAtReadTime(t *testing.T) {
 	late := decode(t, rec.Body.Bytes()).Items[0].Meta
 	if late.Urgency <= early.Urgency {
 		t.Fatalf("urgency should rise as the deadline approaches: early=%v late=%v", early.Urgency, late.Urgency)
+	}
+}
+
+// TestIngestPreservesAndClearsCompletedAt proves the sink treats the ingesting
+// runtime as authoritative for completion: a stamped CompletedAt survives the
+// rescore, and a later open re-ingest (a reopen) clears it so the item revives.
+func TestIngestPreservesAndClearsCompletedAt(t *testing.T) {
+	store := worklist.NewMemoryStore()
+	h := NewIngestHandler(store)
+	done := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+
+	post := func(it worklist.WorkItem) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"items": []worklist.WorkItem{it}})
+		req := httptest.NewRequest(http.MethodPost, "/agent/worklist", bytes.NewReader(body))
+		p := &principal.Principal{Kind: principal.KindUser, Subject: "u1", ActingUserID: "u1", Scopes: []principal.Scope{principal.ScopeAll}}
+		req = req.WithContext(principal.NewContext(req.Context(), p))
+		rec := httptest.NewRecorder()
+		h.Ingest(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("ingest status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// A runtime stamps a confirmed completion: the sink keeps it through Score.
+	post(worklist.WorkItem{ID: "x", Source: "github", GitHub: worklist.GitHubRef{UpdatedAt: done}, Meta: worklist.Metadata{CompletedAt: done}})
+	got, _ := store.List(context.Background(), "u1")
+	if len(got) != 1 || got[0].Meta.CompletedAt.IsZero() {
+		t.Fatalf("CompletedAt should be preserved on ingest, got %+v", got)
+	}
+
+	// A later github-ingest re-fetches the same item as open (a reopen): the zero
+	// CompletedAt in the payload clears it, so the item resurfaces.
+	post(worklist.WorkItem{ID: "x", Source: "github", GitHub: worklist.GitHubRef{UpdatedAt: done.Add(time.Hour)}})
+	got, _ = store.List(context.Background(), "u1")
+	if len(got) != 1 || !got[0].Meta.CompletedAt.IsZero() {
+		t.Fatalf("CompletedAt should clear when re-ingested open, got %+v", got)
 	}
 }
 

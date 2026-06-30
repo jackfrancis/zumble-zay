@@ -91,6 +91,13 @@ type Metadata struct {
 	// it; an agent clears it (auto-unhide) once the underlying GitHub item is
 	// updated after this time, so a changed item resurfaces (docs/adr/0017).
 	HiddenAt time.Time `json:"hidden_at,omitempty"`
+
+	// CompletedAt is when the underlying GitHub item was closed or merged; zero
+	// means still open. An agent sets it when the item leaves the open radar and
+	// is confirmed terminal, retiring it from the user-facing list while the row
+	// and its thread are kept (a soft retire); re-ingesting the item as open
+	// clears it, so a reopened item resurfaces (docs/adr/0017).
+	CompletedAt time.Time `json:"completed_at,omitempty"`
 }
 
 // Contribution is one explainable factor in a score: a signal's signed weight

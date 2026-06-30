@@ -50,3 +50,27 @@ func TestResolveFiltersHiddenItems(t *testing.T) {
 		t.Error("backfill must not run when the store has items (even if all hidden)")
 	}
 }
+
+func TestResolveFiltersCompletedItems(t *testing.T) {
+	now := time.Now().UTC()
+	store := NewMemoryStore()
+	store.Seed("u1",
+		WorkItem{ID: "a", OwnerID: "u1", Meta: Metadata{Origin: OriginAgent}, GitHub: GitHubRef{UpdatedAt: now}, Signals: Signals{Reasons: []Reason{ReasonReviewRequested}}},
+		WorkItem{ID: "done", OwnerID: "u1", Meta: Metadata{Origin: OriginAgent, CompletedAt: now}, GitHub: GitHubRef{UpdatedAt: now}, Signals: Signals{Reasons: []Reason{ReasonAuthor}}},
+	)
+
+	ing := &noopIngestor{}
+	status, items, err := Resolve(context.Background(), store, ing, now, "u1", DefaultSort, true)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if status != StatusReady {
+		t.Fatalf("status = %q, want ready", status)
+	}
+	if len(items) != 1 || items[0].ID != "a" {
+		t.Fatalf("expected only the open item 'a', got %+v", items)
+	}
+	if ing.called {
+		t.Error("backfill must not run when the store has items (even if all completed)")
+	}
+}

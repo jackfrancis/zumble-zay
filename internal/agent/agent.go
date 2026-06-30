@@ -206,10 +206,16 @@ func runIngest(ctx context.Context, p RunParams) error {
 	if err != nil {
 		return fmt.Errorf("vend credential: %w", err)
 	}
-	items, err := github.NewClient(p.Client, p.GitHubBaseURL).FetchWorklist(ctx, cred.AccessToken)
+	gh := github.NewClient(p.Client, p.GitHubBaseURL)
+	items, err := gh.FetchWorklist(ctx, cred.AccessToken)
 	if err != nil {
 		return fmt.Errorf("fetch github: %w", err)
 	}
+	// Retire work that has left the open radar and is confirmed closed/merged, so
+	// completed items stop ranking. Soft: the row and its thread are kept, and a
+	// reopen resurfaces it (docs/adr/0017). Best-effort and bounded; the open
+	// snapshot was just fetched, so only items absent from it can be terminal.
+	items = append(items, retireCompleted(ctx, gh, cred.AccessToken, zz, items)...)
 	if len(items) == 0 {
 		return nil
 	}
@@ -217,6 +223,69 @@ func runIngest(ctx context.Context, p RunParams) error {
 		return fmt.Errorf("ingest: %w", err)
 	}
 	return nil
+}
+
+// retireCompleted finds stored github items that have left the open snapshot and
+// confirms which are actually closed/merged (rather than merely unassigned or
+// review-withdrawn), returning them stamped CompletedAt so the sink retires them
+// from the radar. It checks only dropped-off items — those still in the snapshot
+// were just fetched as open — skips items already marked done, and is bounded so
+// a first-run backlog catches up over a few cycles rather than in one burst.
+func retireCompleted(ctx context.Context, gh *github.Client, token string, zz *ZZClient, open []worklist.WorkItem) []worklist.WorkItem {
+	stored, err := zz.ListWorklist(ctx, 0)
+	if err != nil || len(stored) == 0 {
+		return nil // best-effort: a read failure just skips retirement this cycle
+	}
+	openIDs := make(map[string]struct{}, len(open))
+	for _, it := range open {
+		openIDs[it.ID] = struct{}{}
+	}
+	var candidates []worklist.WorkItem
+	for _, it := range stored {
+		if it.Source != "github" {
+			continue
+		}
+		if _, stillOpen := openIDs[it.ID]; stillOpen {
+			continue // in the open snapshot: known open, nothing to confirm
+		}
+		if !it.Meta.CompletedAt.IsZero() {
+			continue // already retired
+		}
+		candidates = append(candidates, it)
+		if len(candidates) >= defaultEnrichLimit {
+			break
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	var (
+		mu      sync.Mutex
+		retired []worklist.WorkItem
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, enrichConcurrency)
+	)
+	for i := range candidates {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(it worklist.WorkItem) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			state, at, err := gh.ItemState(ctx, token, it.GitHub.Repo, it.GitHub.Number)
+			if err != nil || state != "closed" {
+				return // best-effort; only a confirmed close/merge retires
+			}
+			if at.IsZero() {
+				at = time.Now().UTC()
+			}
+			it.Meta.CompletedAt = at
+			mu.Lock()
+			retired = append(retired, it)
+			mu.Unlock()
+		}(candidates[i])
+	}
+	wg.Wait()
+	return retired
 }
 
 // defaultEnrichLimit bounds how many items a single enrich run fetches expensive

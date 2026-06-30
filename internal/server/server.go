@@ -147,15 +147,20 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, v
 
 	// Staleness reconciler: when the store can enumerate items, periodically
 	// re-rank those whose discussion-derived research has gone stale, enqueuing
-	// per-item research jobs through the control plane (docs/adr/0022). It lives in
-	// the web tier because it reads the (in-memory) store; it moves to the
-	// orchestrator once the store is shared (roadmap #5). At replicas:1 it is a
-	// single goroutine; leader-gate it past that (ADR 0007).
+	// per-item research jobs through the control plane (docs/adr/0022). A slower
+	// Refresher re-ingests each owner's worklist so it stays in sync with GitHub —
+	// new items appear, signals refresh, and completed work is retired
+	// (docs/adr/0017); without it the pipeline runs only on an empty worklist. Both
+	// live in the web tier because they read the (in-memory) store; they move to
+	// the orchestrator once the store is shared (roadmap #5). At replicas:1 each is
+	// a single goroutine; leader-gate them past that (ADR 0007).
 	stopReconcile := func() {}
 	if lister, ok := store.(worklist.Lister); ok {
 		rec := reconcile.New(lister, cp, reconcile.DefaultInterval, log)
 		rec.Start()
-		stopReconcile = rec.Stop
+		ref := reconcile.NewRefresher(lister, cp, reconcile.DefaultRefreshInterval, log)
+		ref.Start()
+		stopReconcile = func() { rec.Stop(); ref.Stop() }
 	}
 
 	// The orchestrator's own lifecycle is owned by the composition root (the

@@ -277,3 +277,45 @@ func TestItemActivityOthersCommentLastIsNeutral(t *testing.T) {
 		t.Errorf("no review requested of me; should not be awaiting me, got %v", act.AwaitingMeSince)
 	}
 }
+
+// TestItemState reads lifecycle state from the issues endpoint, which serves both
+// issues and PRs: a merged or closed PR both report state "closed" with a
+// closed_at, the "completed" signal used to retire finished work.
+func TestItemState(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantState  string
+		wantClosed bool
+	}{
+		{"open", `{"state":"open"}`, "open", false},
+		{"closed-issue", `{"state":"closed","closed_at":"2026-06-20T10:00:00Z"}`, "closed", true},
+		{"merged-pr", `{"state":"closed","closed_at":"2026-06-21T09:00:00Z","pull_request":{"url":"x"}}`, "closed", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/repos/o/r/issues/5" {
+					t.Errorf("path = %q", r.URL.Path)
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c := NewClient(srv.Client(), srv.URL)
+			state, at, err := c.ItemState(context.Background(), "tok", "o/r", 5)
+			if err != nil {
+				t.Fatalf("ItemState: %v", err)
+			}
+			if state != tc.wantState {
+				t.Errorf("state = %q, want %q", state, tc.wantState)
+			}
+			if tc.wantClosed && at.IsZero() {
+				t.Errorf("a closed item should carry a completion time")
+			}
+			if !tc.wantClosed && !at.IsZero() {
+				t.Errorf("an open item should have zero completion time, got %v", at)
+			}
+		})
+	}
+}

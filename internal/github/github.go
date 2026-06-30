@@ -636,6 +636,29 @@ func (c *Client) IssueStatus(ctx context.Context, token, repo string, number int
 	return fmt.Sprintf("%s %s#%d %q: state=%s%s\n%s", kind, repo, is.Number, is.Title, is.State, closed, is.HTMLURL), nil
 }
 
+// ItemState reports an issue or PR's current lifecycle state in one call. It uses
+// the issues endpoint, which serves both (a PR is an issue in the API), so a
+// merged or closed PR both report state "closed" — exactly the "completed" signal
+// used to retire finished work from the radar. completedAt is when it closed
+// (zero while open).
+func (c *Client) ItemState(ctx context.Context, token, repo string, number int) (state string, completedAt time.Time, err error) {
+	body, err := c.get(ctx, token, fmt.Sprintf("/repos/%s/issues/%d", repo, number))
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	var is struct {
+		State    string     `json:"state"`
+		ClosedAt *time.Time `json:"closed_at"`
+	}
+	if err := json.Unmarshal(body, &is); err != nil {
+		return "", time.Time{}, err
+	}
+	if is.ClosedAt != nil {
+		return is.State, is.ClosedAt.UTC(), nil
+	}
+	return is.State, time.Time{}, nil
+}
+
 // Search runs a GitHub issues/PRs search and returns the top matches as compact
 // text. It accepts the full GitHub search syntax (e.g. "repo:owner/name otel").
 func (c *Client) Search(ctx context.Context, token, query string) (string, error) {

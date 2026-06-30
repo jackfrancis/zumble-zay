@@ -86,3 +86,32 @@ func TestReconcileOnceEnqueuesOnlyStaleItems(t *testing.T) {
 		t.Fatalf("expected only u1/stale enqueued, got %v", enq.calls)
 	}
 }
+
+type recordingBackfiller struct{ owners []string }
+
+func (r *recordingBackfiller) EnsureBackfill(_ context.Context, owner string) error {
+	r.owners = append(r.owners, owner)
+	return nil
+}
+
+func TestRefreshOnceReSyncsEveryOwner(t *testing.T) {
+	lister := fakeLister{items: map[string][]worklist.WorkItem{
+		"u1": {{ID: "a"}},
+		"u2": {{ID: "b"}, {ID: "c"}},
+	}}
+	enq := &recordingBackfiller{}
+	r := NewRefresher(lister, enq, time.Minute, nil)
+
+	r.RefreshOnce(context.Background())
+
+	if len(enq.owners) != 2 {
+		t.Fatalf("expected a backfill per owner, got %v", enq.owners)
+	}
+	seen := map[string]bool{}
+	for _, o := range enq.owners {
+		seen[o] = true
+	}
+	if !seen["u1"] || !seen["u2"] {
+		t.Errorf("both owners should be re-synced, got %v", enq.owners)
+	}
+}

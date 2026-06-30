@@ -90,8 +90,14 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		// foundation. A github-ingest sends no research; enrich/rank round-trip the
 		// stored value, so this is a no-op for them.
 		req.Items[i].Signals.Research = prevResearch[req.Items[i].ID]
+		// The ingesting runtime is authoritative for completion: a github-ingest
+		// sends open items (zero, which revives a reopened item), while the ingest
+		// runtime stamps a confirmed close/merge (docs/adr/0017). Capture it before
+		// Score recomputes Meta, then restore it.
+		completedAt := req.Items[i].Meta.CompletedAt
 		// Decorate ZZ metadata by scoring the item's signals (docs/adr/0008).
 		req.Items[i].Meta = worklist.Score(req.Items[i], now)
+		req.Items[i].Meta.CompletedAt = completedAt
 		// Carry (or auto-clear) the user's hidden state (docs/adr/0017).
 		req.Items[i].Meta.HiddenAt = worklist.HiddenAfter(prevHidden[req.Items[i].ID], req.Items[i].GitHub.UpdatedAt)
 		// Preserve the assistive conversation across re-ingest (docs/adr/0018);

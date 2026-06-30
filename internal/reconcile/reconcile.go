@@ -1,9 +1,12 @@
-// Package reconcile periodically re-ranks work items whose discussion-derived
-// research has gone stale, by enqueuing per-item research jobs (docs/adr/0022).
-// It is the trigger for the research agent (slice 3): not per discussion entry,
-// but an aggressive timer that catches up within a few minutes. It reads the
-// worklist through worklist.Lister and enqueues through the ResearchEnqueuer
-// seam, so it couples to neither the store backend nor the control plane.
+// Package reconcile runs periodic worklist maintenance over worklist.Lister,
+// enqueuing through the control plane without coupling to the store backend or
+// the control-plane transport. Two loops live here:
+//
+//   - Reconciler re-ranks items whose discussion-derived research has gone stale
+//     (docs/adr/0022): an aggressive timer that catches up within a few minutes.
+//   - Refresher re-ingests each owner's worklist on a slower timer so it stays in
+//     sync with GitHub — new items appear, signals refresh, and completed work
+//     (closed/merged) is retired from the radar (docs/adr/0017).
 package reconcile
 
 import (
@@ -104,6 +107,103 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) {
 	}
 	if enqueued > 0 && r.log != nil {
 		r.log.Info("reconcile: enqueued research re-ranks", "count", enqueued)
+	}
+}
+
+// BackfillEnqueuer triggers a fresh ingest of an owner's worklist. The
+// orchestrator satisfies it via EnsureBackfill, which dedups an already in-flight
+// ingest, so periodic refresh is safe to call repeatedly (docs/adr/0007). It is a
+// separate seam from ResearchEnqueuer so the Refresher couples to neither the
+// store backend nor the control-plane transport.
+type BackfillEnqueuer interface {
+	EnsureBackfill(ctx context.Context, ownerID string) error
+}
+
+// DefaultRefreshInterval is the worklist re-sync cadence. Each refresh re-runs
+// the full ingest pipeline (ingest -> enrich -> rank), which re-invokes the LLM
+// ranker on the shortlist, so the interval trades freshness against rank cost.
+// Completed work is not urgent to retire, and a populated radar rarely changes
+// much between fetches, so a slow timer (minutes, not seconds) is the right
+// default; tune it down in dev to watch retirement fire, up in prod to cap cost.
+const DefaultRefreshInterval = 10 * time.Minute
+
+// Refresher periodically re-ingests every owner's worklist so it stays in sync
+// with GitHub: new items appear, signals refresh, and completed work (closed or
+// merged) is retired (docs/adr/0017). Without it the ingest pipeline runs only on
+// an empty worklist (Resolve's backfill-on-empty), so a populated radar never
+// re-syncs. At replicas:1 it is a single goroutine; past that it must be
+// leader-gated, since it wants a single leader (docs/adr/0007).
+type Refresher struct {
+	lister   worklist.Lister
+	enqueuer BackfillEnqueuer
+	interval time.Duration
+	log      *slog.Logger
+	stop     chan struct{}
+	done     chan struct{}
+}
+
+// NewRefresher builds a Refresher. A non-positive interval uses
+// DefaultRefreshInterval.
+func NewRefresher(lister worklist.Lister, enqueuer BackfillEnqueuer, interval time.Duration, log *slog.Logger) *Refresher {
+	if interval <= 0 {
+		interval = DefaultRefreshInterval
+	}
+	return &Refresher{
+		lister:   lister,
+		enqueuer: enqueuer,
+		interval: interval,
+		log:      log,
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+}
+
+// Start launches the refresh loop. Call Stop to end it.
+func (r *Refresher) Start() { go r.loop() }
+
+func (r *Refresher) loop() {
+	defer close(r.done)
+	ticker := time.NewTicker(r.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-ticker.C:
+			r.RefreshOnce(context.Background())
+		}
+	}
+}
+
+// Stop ends the loop and waits for it to return.
+func (r *Refresher) Stop() {
+	close(r.stop)
+	<-r.done
+}
+
+// RefreshOnce enqueues a worklist re-ingest for every owner that has stored
+// items. EnsureBackfill dedups an in-flight ingest, so overlapping ticks collapse
+// to one job per owner. Exported for tests.
+func (r *Refresher) RefreshOnce(ctx context.Context) {
+	all, err := r.lister.All(ctx)
+	if err != nil {
+		if r.log != nil {
+			r.log.Warn("refresh: list owners", "err", err)
+		}
+		return
+	}
+	var enqueued int
+	for owner := range all {
+		if err := r.enqueuer.EnsureBackfill(ctx, owner); err != nil {
+			if r.log != nil {
+				r.log.Warn("refresh: enqueue backfill", "owner", owner, "err", err)
+			}
+			continue
+		}
+		enqueued++
+	}
+	if enqueued > 0 && r.log != nil {
+		r.log.Info("refresh: enqueued worklist re-syncs", "count", enqueued)
 	}
 }
 
