@@ -6,10 +6,18 @@
 // turn schedules the workload on its own Docker or Kubernetes runtime with strong
 // isolation. It therefore needs no Kubernetes client and no ZZ RBAC.
 //
-// The client is hand-rolled over net/http against the OpenSandbox lifecycle API,
-// so the substrate adds no third-party module to ZZ and needs no build tag — it
-// self-registers (LAUNCHER=opensandbox) like the in-cluster launchers. Completion
-// is detached and callback-driven (docs/adr/0025): the runtime reports terminal
-// completion to ZZ, the orchestrator races that against this launcher's deadline
-// backstop, and the sandbox self-reaps via its create-time timeout.
+// The client is hand-rolled over net/http against the OpenSandbox lifecycle and
+// execd APIs, so the substrate adds no third-party module to ZZ and needs no build
+// tag — it self-registers (LAUNCHER=opensandbox) like the in-cluster launchers.
+//
+// OpenSandbox sandboxes are long-lived, exec-into environments, not one-shot
+// workloads, so the runtime is not the container entrypoint. Dispatch creates a
+// keep-alive sandbox (tail -f /dev/null), waits for it to reach Running, then
+// execs /runtime into it through execd, carrying the ZZ_* injection contract as
+// the command environment. The sandbox image must therefore be shell-bearing and
+// contain /runtime (the distroless ZZ runtime image is neither — set
+// OPENSANDBOX_RUNTIME_IMAGE). Completion is detached and callback-driven
+// (docs/adr/0025): the runtime reports completion to ZZ, the orchestrator races
+// that against this launcher's deadline backstop, and the sandbox self-reaps via
+// its create-time timeout.
 package opensandbox

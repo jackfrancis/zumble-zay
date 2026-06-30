@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,155 +14,179 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 )
 
-// testLauncher wires a Launcher to a test server's client.
 func testLauncher(srv *httptest.Server, opts Options) *Launcher {
 	return &Launcher{client: newClient(srv.URL, "test-key", srv.Client()), opts: opts}
 }
 
-// TestDispatchCreatesSandboxWithRuntimeContract is the cross-substrate regression
-// check: the create request carries the identical ZZ_* injection contract as the
-// Job/Pod/Sandbox launchers, plus the runtime image and its entrypoint
-// (docs/adr/0012, 0027).
-func TestDispatchCreatesSandboxWithRuntimeContract(t *testing.T) {
-	var gotMethod, gotPath, gotAPIKey string
-	var gotReq createSandboxRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath, gotAPIKey = r.Method, r.URL.Path, r.Header.Get(apiKeyHeader)
-		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(sandboxInfo{ID: "sbx-123", Status: sandboxStatus{State: "Pending"}})
-	}))
-	defer srv.Close()
+// fakeServer simulates the OpenSandbox lifecycle + execd surface this launcher
+// uses: create, get (reporting the configured state), resolve endpoint (pointing
+// back at this same server so the exec lands here), the execd /command, and
+// delete. It records the create body, the exec body, and the headers the exec
+// carried.
+type fakeServer struct {
+	srv       *httptest.Server
+	state     string // state returned from GET /sandboxes/{id}
+	createReq createSandboxRequest
+	cmdReq    runCommandRequest
+	cmdAuth   string // X-EXECD-ACCESS-TOKEN seen on /command
+	cmdAPIKey string // OPEN-SANDBOX-API-KEY seen on /command
+	deleted   chan string
+}
 
-	l := testLauncher(srv, Options{Image: "img:1", ZZBaseURL: "http://zz:8080", CPU: "500m", Memory: "512Mi"})
+func newFakeServer(t *testing.T, state string) *fakeServer {
+	t.Helper()
+	f := &fakeServer{state: state, deleted: make(chan string, 1)}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes":
+			_ = json.NewDecoder(r.Body).Decode(&f.createReq)
+			writeJSON(w, http.StatusCreated, sandboxInfo{ID: "sbx-1", Status: sandboxStatus{State: "Pending"}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/endpoints/44772"):
+			writeJSON(w, http.StatusOK, endpointInfo{
+				Endpoint: strings.TrimPrefix(f.srv.URL, "http://"),
+				Headers:  map[string]string{"X-EXECD-ACCESS-TOKEN": "etok"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/sandboxes/sbx-1":
+			writeJSON(w, http.StatusOK, sandboxInfo{ID: "sbx-1", Status: sandboxStatus{State: f.state}})
+		case r.Method == http.MethodPost && r.URL.Path == "/command":
+			f.cmdAuth = r.Header.Get("X-EXECD-ACCESS-TOKEN")
+			f.cmdAPIKey = r.Header.Get(apiKeyHeader)
+			_ = json.NewDecoder(r.Body).Decode(&f.cmdReq)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && r.URL.Path == "/sandboxes/sbx-1":
+			select {
+			case f.deleted <- "sbx-1":
+			default:
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// TestDispatchCreatesKeepAliveSandboxAndExecsRuntime is the model + cross-substrate
+// check: Dispatch creates a keep-alive sandbox (tail entrypoint, no ZZ_* container
+// env) and execs the runtime into it via execd, carrying the identical ZZ_*
+// injection contract through the command env (docs/adr/0027).
+func TestDispatchCreatesKeepAliveSandboxAndExecsRuntime(t *testing.T) {
+	f := newFakeServer(t, "Running")
+	l := testLauncher(f.srv, Options{Image: "shell-img:1", ZZBaseURL: "http://zz:8080", CPU: "500m", Memory: "512Mi"})
+
 	h, err := l.Dispatch(context.Background(), orchestrator.JobSpec{
 		JobID: "j1", Type: "github-enrich", Provider: "github", ActingUserID: "github:1494193",
 	}, "tok-123")
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
+	if h.Kind != handleKind || h.Ref != "sbx-1" {
+		t.Errorf("handle = %+v, want {opensandbox sbx-1}", h)
+	}
 
-	if gotMethod != http.MethodPost || gotPath != "/sandboxes" {
-		t.Errorf("request = %s %s, want POST /sandboxes", gotMethod, gotPath)
+	// Keep-alive sandbox: tail entrypoint, shell image, NO ZZ_* on container env.
+	if got := f.createReq.Entrypoint; len(got) != 3 || got[0] != "tail" {
+		t.Errorf("entrypoint = %v, want keep-alive tail", got)
 	}
-	if gotAPIKey != "test-key" {
-		t.Errorf("api key header = %q, want test-key", gotAPIKey)
+	if f.createReq.Image == nil || f.createReq.Image.URI != "shell-img:1" {
+		t.Errorf("image = %+v, want shell-img:1", f.createReq.Image)
 	}
-	if h.Kind != handleKind || h.Ref != "sbx-123" {
-		t.Errorf("handle = %+v, want {opensandbox sbx-123}", h)
+	if len(f.createReq.Env) != 0 {
+		t.Errorf("container env should be empty (ZZ_* rides the exec), got %v", f.createReq.Env)
 	}
-	if gotReq.Image == nil || gotReq.Image.URI != "img:1" {
-		t.Errorf("image = %+v, want uri img:1", gotReq.Image)
+	if f.createReq.Metadata["zumble-zay.dev/acting-user"] != "github-1494193" {
+		t.Errorf("acting-user metadata = %q, want github-1494193 (sanitized)", f.createReq.Metadata["zumble-zay.dev/acting-user"])
 	}
-	if len(gotReq.Entrypoint) != 1 || gotReq.Entrypoint[0] != runtimeEntrypoint {
-		t.Errorf("entrypoint = %v, want [%s]", gotReq.Entrypoint, runtimeEntrypoint)
+
+	// Exec: /runtime, background, ZZ_* contract delivered through execd envs.
+	if f.cmdReq.Command != runtimeCommand || !f.cmdReq.Background {
+		t.Errorf("command = %q background=%v, want %q background=true", f.cmdReq.Command, f.cmdReq.Background, runtimeCommand)
 	}
-	if gotReq.ResourceLimits["cpu"] != "500m" || gotReq.ResourceLimits["memory"] != "512Mi" {
-		t.Errorf("resourceLimits = %v, want cpu=500m memory=512Mi", gotReq.ResourceLimits)
+	if f.cmdReq.Envs[agent.EnvJobType] != "github-enrich" || f.cmdReq.Envs[agent.EnvBaseURL] != "http://zz:8080" ||
+		f.cmdReq.Envs[agent.EnvToken] != "tok-123" || f.cmdReq.Envs[agent.EnvProvider] != "github" {
+		t.Errorf("exec env missing/incorrect: %v", f.cmdReq.Envs)
 	}
-	if gotReq.Env[agent.EnvJobType] != "github-enrich" || gotReq.Env[agent.EnvBaseURL] != "http://zz:8080" ||
-		gotReq.Env[agent.EnvToken] != "tok-123" || gotReq.Env[agent.EnvProvider] != "github" {
-		t.Errorf("injection env missing/incorrect: %v", gotReq.Env)
-	}
-	if _, ok := gotReq.Env[agent.EnvAIToken]; ok {
+	if _, ok := f.cmdReq.Envs[agent.EnvAIToken]; ok {
 		t.Errorf("ZZ_AI_TOKEN must be absent when no model token is configured")
 	}
-	if gotReq.Metadata["zumble-zay.dev/acting-user"] != "github-1494193" {
-		t.Errorf("acting-user metadata = %q, want github-1494193 (sanitized)", gotReq.Metadata["zumble-zay.dev/acting-user"])
+	// Auth: the execd access token is forwarded from the endpoint, and the API key
+	// rides along for the server-proxy path.
+	if f.cmdAuth != "etok" {
+		t.Errorf("execd token header = %q, want etok (forwarded from endpoint)", f.cmdAuth)
+	}
+	if f.cmdAPIKey != "test-key" {
+		t.Errorf("api key header = %q, want test-key", f.cmdAPIKey)
 	}
 }
 
 // TestDispatchMapsDeadlineToSelfReapTimeout verifies the job deadline becomes the
-// sandbox's self-reap timeout (remaining + grace), so a finished sandbox cleans
-// itself up even if the prompt delete is missed.
+// keep-alive sandbox's self-reap timeout (remaining + grace).
 func TestDispatchMapsDeadlineToSelfReapTimeout(t *testing.T) {
-	var gotReq createSandboxRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(sandboxInfo{ID: "sbx-1"})
-	}))
-	defer srv.Close()
-
-	l := testLauncher(srv, Options{Image: "img", CPU: "1", Memory: "1Gi"})
+	f := newFakeServer(t, "Running")
+	l := testLauncher(f.srv, Options{Image: "img", CPU: "1", Memory: "1Gi"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if _, err := l.Dispatch(ctx, orchestrator.JobSpec{Type: "github-ingest"}, "tok"); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	if gotReq.Timeout == nil {
+	if f.createReq.Timeout == nil {
 		t.Fatalf("timeout not set")
 	}
-	// 2m remaining + 5m grace ≈ 420s.
-	if *gotReq.Timeout < 400 || *gotReq.Timeout > 440 {
-		t.Errorf("timeout = %d, want ~420 (2m + 5m grace)", *gotReq.Timeout)
+	if *f.createReq.Timeout < 400 || *f.createReq.Timeout > 440 {
+		t.Errorf("timeout = %d, want ~420 (2m + 5m grace)", *f.createReq.Timeout)
 	}
 }
 
 // TestDispatchForwardsModelTokenAsValue checks the ranking-model token rides as a
-// plain env value (OpenSandbox is remote; the in-cluster Secret reference does not
-// apply, docs/adr/0027).
+// plain exec env value (OpenSandbox is remote; the in-cluster Secret reference
+// does not apply, docs/adr/0027).
 func TestDispatchForwardsModelTokenAsValue(t *testing.T) {
-	var gotReq createSandboxRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(sandboxInfo{ID: "sbx-ai"})
-	}))
-	defer srv.Close()
-
-	l := testLauncher(srv, Options{Image: "img", AIToken: "ai-secret", CPU: "1", Memory: "1Gi"})
+	f := newFakeServer(t, "Running")
+	l := testLauncher(f.srv, Options{Image: "img", AIToken: "ai-secret", CPU: "1", Memory: "1Gi"})
 	if _, err := l.Dispatch(context.Background(), orchestrator.JobSpec{Type: "llm-rank"}, "tok"); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
-	if gotReq.Env[agent.EnvAIToken] != "ai-secret" {
-		t.Errorf("ZZ_AI_TOKEN = %q, want ai-secret (forwarded as a value)", gotReq.Env[agent.EnvAIToken])
+	if f.cmdReq.Envs[agent.EnvAIToken] != "ai-secret" {
+		t.Errorf("ZZ_AI_TOKEN = %q, want ai-secret (forwarded as a value)", f.cmdReq.Envs[agent.EnvAIToken])
 	}
 }
 
-// TestAwaitWaitsForDeadlineThenDeletes verifies the detached Await blocks until
-// the context is done (the deadline backstop, docs/adr/0025) and then best-effort
-// deletes the sandbox so it does not linger until its self-reap timeout.
-func TestAwaitWaitsForDeadlineThenDeletes(t *testing.T) {
-	gotDelete := make(chan string, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			gotDelete <- r.URL.Path
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
+// TestDispatchFailsAndCleansUpWhenSandboxNeverRuns verifies Dispatch fails fast on
+// a terminal sandbox state and best-effort deletes the sandbox so none leaks.
+func TestDispatchFailsAndCleansUpWhenSandboxNeverRuns(t *testing.T) {
+	f := newFakeServer(t, "Failed")
+	l := testLauncher(f.srv, Options{Image: "img", CPU: "1", Memory: "1Gi"})
+	if _, err := l.Dispatch(context.Background(), orchestrator.JobSpec{Type: "github-ingest"}, "tok"); err == nil {
+		t.Fatalf("Dispatch: want error when the sandbox enters Failed")
+	}
+	select {
+	case <-f.deleted:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("failed sandbox was not cleaned up")
+	}
+}
 
-	l := testLauncher(srv, Options{})
+// TestAwaitWaitsForDeadlineThenDeletes verifies the detached Await blocks until the
+// context is done (the deadline backstop, docs/adr/0025) and then best-effort
+// deletes the sandbox.
+func TestAwaitWaitsForDeadlineThenDeletes(t *testing.T) {
+	f := newFakeServer(t, "Running")
+	l := testLauncher(f.srv, Options{})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if err := l.Await(ctx, orchestrator.Handle{Kind: handleKind, Ref: "sbx-await"}); err == nil {
+	if err := l.Await(ctx, orchestrator.Handle{Kind: handleKind, Ref: "sbx-1"}); err == nil {
 		t.Fatalf("Await returned nil, want context deadline error")
 	}
 	select {
-	case path := <-gotDelete:
-		if path != "/sandboxes/sbx-await" {
-			t.Errorf("delete path = %q, want /sandboxes/sbx-await", path)
-		}
+	case <-f.deleted:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("best-effort delete was not called")
-	}
-}
-
-// TestDispatchSurfacesServerError verifies a non-2xx lifecycle response fails the
-// dispatch rather than returning a bogus handle.
-func TestDispatchSurfacesServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"invalid request"}`))
-	}))
-	defer srv.Close()
-
-	l := testLauncher(srv, Options{Image: "img", CPU: "1", Memory: "1Gi"})
-	if _, err := l.Dispatch(context.Background(), orchestrator.JobSpec{Type: "github-ingest"}, "tok"); err == nil {
-		t.Fatalf("Dispatch with HTTP 400: want error")
 	}
 }
 

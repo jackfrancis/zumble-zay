@@ -20,19 +20,31 @@ const (
 	launcherName = "opensandbox"
 	// handleKind labels the workload's location on the Handle (docs/adr/0012).
 	handleKind = "opensandbox"
-	// runtimeEntrypoint is the runtime image's command. OpenSandbox requires an
-	// explicit entrypoint when creating from an image; it matches the runtime
-	// Dockerfile's ENTRYPOINT ["/runtime"].
-	runtimeEntrypoint = "/runtime"
+	// execdPort is the in-sandbox port of OpenSandbox's execd agent, through which
+	// the runtime command is started (docs/adr/0027).
+	execdPort = 44772
+	// runtimeCommand is the shell command execd runs inside the keep-alive sandbox
+	// to start the agent runtime. The sandbox image must therefore carry a shell
+	// and the /runtime binary — the distroless ZZ runtime image has neither, so a
+	// shell-bearing variant is required (see OPENSANDBOX_RUNTIME_IMAGE).
+	runtimeCommand = "/runtime"
 	// shutdownGrace is added past a job's deadline for the sandbox's self-reap
-	// timeout, so a finished sandbox cleans itself up shortly after the job's
-	// worst case even if the prompt delete is missed — the sandbox equivalent of
-	// a Job's TTL.
+	// timeout, so a finished sandbox cleans itself up shortly after the job's worst
+	// case even if the prompt delete is missed — the sandbox equivalent of a Job's
+	// TTL.
 	shutdownGrace = 5 * time.Minute
+	// readyTimeout bounds how long Dispatch waits for a freshly created sandbox to
+	// reach Running before it can exec the runtime into it.
+	readyTimeout = 90 * time.Second
 
 	defaultCPU    = "500m"
 	defaultMemory = "512Mi"
 )
+
+// keepAliveEntrypoint keeps the sandbox container alive so the runtime can be
+// exec'd into it; OpenSandbox runs its execd agent alongside this. It is the
+// platform's own default, set explicitly for clarity (docs/adr/0027).
+var keepAliveEntrypoint = []string{"tail", "-f", "/dev/null"}
 
 // init registers the substrate so LAUNCHER=opensandbox selects it (docs/adr/0024,
 // 0027). The package self-registers and is activated by a blank import in
@@ -41,26 +53,31 @@ func init() {
 	launcher.Register(launcherName, build)
 }
 
-// Options are the runtime-shaping settings this launcher forwards to each
-// sandbox. They are the substrate-neutral subset (mapped onto runtimespec) plus
-// the sandbox resource limits. The ranking-model token is held as a value, not a
-// Secret reference: OpenSandbox is remote, so the in-cluster secretKeyRef path
-// does not apply. TODO(adr-0027): vend it through OpenSandbox's Credential Vault
-// instead of forwarding the value.
+// Options are the runtime-shaping settings this launcher forwards to each sandbox.
+// Image is the SANDBOX image: because OpenSandbox runs the runtime via `sh -c`
+// inside a keep-alive container, it must carry a shell and the /runtime binary
+// (not the distroless ZZ runtime image) — see OPENSANDBOX_RUNTIME_IMAGE. The
+// ranking-model token is held as a value, not a Secret reference: OpenSandbox is
+// remote, so the in-cluster secretKeyRef path does not apply.
+// TODO(adr-0027): vend it through OpenSandbox's Credential Vault instead.
 type Options struct {
-	Image      string
-	ZZBaseURL  string
-	AIEndpoint string
-	AIModel    string
-	AIToken    string
-	CPU        string
-	Memory     string
+	Image          string
+	ZZBaseURL      string
+	AIEndpoint     string
+	AIModel        string
+	AIToken        string
+	CPU            string
+	Memory         string
+	UseServerProxy bool
 }
 
 // Launcher runs each agent job as an OpenSandbox sandbox via the lifecycle API.
-// It is detached: a sandbox has no batch-style completion to watch, so completion
-// arrives from the runtime's callback (docs/adr/0025) and the per-job deadline is
-// the backstop. It needs no Kubernetes client and no ZZ RBAC — OpenSandbox's own
+// Because OpenSandbox sandboxes are long-lived, exec-into environments (not
+// one-shot workloads), the runtime is not the container entrypoint: Dispatch
+// creates a keep-alive sandbox, waits for it to be Running, then execs the runtime
+// into it through execd (docs/adr/0027). Completion is detached: the runtime
+// reports it via callback (docs/adr/0025) and the per-job deadline is the
+// backstop. It needs no Kubernetes client and no ZZ RBAC — OpenSandbox's own
 // identity schedules the workload.
 type Launcher struct {
 	client *client
@@ -85,17 +102,21 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 		return nil, fmt.Errorf("opensandbox: OPENSANDBOX_ENDPOINT and OPENSANDBOX_API_KEY must be set")
 	}
 	opts := Options{
-		Image:      cfg.Runtime.Image,
-		ZZBaseURL:  cfg.Runtime.ZZBaseURL,
-		AIEndpoint: cfg.AI.Endpoint,
-		AIModel:    cfg.AI.Model,
-		AIToken:    cfg.AI.Token,
-		CPU:        getenvOr("OPENSANDBOX_CPU", defaultCPU),
-		Memory:     getenvOr("OPENSANDBOX_MEMORY", defaultMemory),
+		// The sandbox image must be shell-bearing (OpenSandbox execs via sh -c), so
+		// it is read separately and falls back to the configured runtime image only
+		// when not overridden — the distroless default will not run here.
+		Image:          getenvOr("OPENSANDBOX_RUNTIME_IMAGE", cfg.Runtime.Image),
+		ZZBaseURL:      cfg.Runtime.ZZBaseURL,
+		AIEndpoint:     cfg.AI.Endpoint,
+		AIModel:        cfg.AI.Model,
+		AIToken:        cfg.AI.Token,
+		CPU:            getenvOr("OPENSANDBOX_CPU", defaultCPU),
+		Memory:         getenvOr("OPENSANDBOX_MEMORY", defaultMemory),
+		UseServerProxy: os.Getenv("OPENSANDBOX_USE_SERVER_PROXY") == "true",
 	}
 	if log != nil {
-		log.Info("using opensandbox launcher (remote control plane; detached: completion via callback only)",
-			"endpoint", endpoint, "image", opts.Image, "zz_base_url", opts.ZZBaseURL)
+		log.Info("using opensandbox launcher (remote control plane; create keep-alive sandbox + exec runtime; detached completion via callback)",
+			"endpoint", endpoint, "image", opts.Image, "zz_base_url", opts.ZZBaseURL, "use_server_proxy", opts.UseServerProxy)
 	}
 	return &Launcher{
 		client: newClient(endpoint, apiKey, &http.Client{Timeout: 30 * time.Second}),
@@ -104,23 +125,86 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 	}, nil
 }
 
-// Dispatch creates a sandbox running the runtime image with the injection
-// contract and returns a Handle naming it, without waiting (docs/adr/0024).
+// Dispatch creates a keep-alive sandbox, waits for it to be Running, and execs the
+// runtime into it (docs/adr/0027). The exec must happen here, not in Await,
+// because only Dispatch receives the job spec and token the runtime needs; this
+// means Dispatch holds a dispatch worker through sandbox provisioning. On any
+// failure after creation it best-effort deletes the sandbox so none leaks.
 func (l *Launcher) Dispatch(ctx context.Context, spec orchestrator.JobSpec, token string) (orchestrator.Handle, error) {
-	info, err := l.client.createSandbox(ctx, l.createRequest(ctx, spec, token))
+	info, err := l.client.createSandbox(ctx, l.createRequest(ctx, spec))
 	if err != nil {
 		return orchestrator.Handle{Kind: handleKind}, fmt.Errorf("create sandbox: %w", err)
 	}
-	return orchestrator.Handle{Kind: handleKind, Ref: info.ID}, nil
+	handle := orchestrator.Handle{Kind: handleKind, Ref: info.ID}
+	if err := l.startRuntime(ctx, info.ID, spec, token); err != nil {
+		l.bestEffortDelete(info.ID)
+		return handle, fmt.Errorf("start runtime: %w", err)
+	}
+	return handle, nil
 }
 
-// Await is detached: a sandbox has no batch-style completion, so it does not poll
-// and instead waits for the per-job deadline (docs/adr/0025). Completion arrives
-// via the runtime's callback, which the orchestrator races against this; reaching
-// the deadline here means no report arrived in time (a timeout). On return — the
-// job finished (callback) or timed out — it best-effort deletes the sandbox so it
-// does not linger until its self-reap timeout. It keys off the Handle alone, so
-// the orchestrator can call it on its own goroutine (docs/adr/0024).
+// startRuntime waits for the sandbox to be Running, resolves its execd endpoint,
+// and execs the runtime into it as a detached (background) command carrying the
+// shared ZZ_* injection contract — identical to every other substrate, just
+// delivered through execd rather than container env (docs/adr/0027). The
+// ranking-model token, absent from the shared map because it is a secret, is added
+// as a value (OpenSandbox is remote; the in-cluster Secret reference does not
+// apply).
+func (l *Launcher) startRuntime(ctx context.Context, id string, spec orchestrator.JobSpec, token string) error {
+	if err := l.waitForRunning(ctx, id); err != nil {
+		return err
+	}
+	ep, err := l.client.resolveEndpoint(ctx, id, execdPort, l.opts.UseServerProxy)
+	if err != nil {
+		return fmt.Errorf("resolve execd endpoint: %w", err)
+	}
+	env := runtimespec.Env(runtimespec.Options{
+		Image:      l.opts.Image,
+		ZZBaseURL:  l.opts.ZZBaseURL,
+		AIEndpoint: l.opts.AIEndpoint,
+		AIModel:    l.opts.AIModel,
+	}, spec, token)
+	if l.opts.AIToken != "" {
+		env[agent.EnvAIToken] = l.opts.AIToken
+	}
+	return l.client.execCommand(ctx, execdURL(ep.Endpoint), ep.Headers, runCommandRequest{
+		Command:    runtimeCommand,
+		Background: true,
+		Envs:       env,
+	})
+}
+
+// waitForRunning polls the lifecycle API until the sandbox reaches Running, fails
+// if it reaches a terminal state, or returns when readyTimeout (or the job
+// deadline, whichever is sooner) elapses.
+func (l *Launcher) waitForRunning(ctx context.Context, id string) error {
+	wctx, cancel := context.WithTimeout(ctx, readyTimeout)
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		if info, err := l.client.getSandbox(wctx, id); err == nil {
+			switch info.Status.State {
+			case "Running":
+				return nil
+			case "Failed", "Terminated", "Stopping":
+				return fmt.Errorf("sandbox %s entered terminal state %q", id, info.Status.State)
+			}
+		}
+		select {
+		case <-wctx.Done():
+			return fmt.Errorf("sandbox %s not Running before timeout: %w", id, wctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// Await is detached: the runtime runs as an exec inside the sandbox and reports
+// completion via callback (docs/adr/0025), so Await has nothing to watch and waits
+// for the per-job deadline (the backstop). On return — the job finished (callback)
+// or timed out — it best-effort deletes the sandbox so it does not linger until
+// its self-reap timeout. It keys off the Handle alone, so the orchestrator can
+// call it on its own goroutine (docs/adr/0024).
 func (l *Launcher) Await(ctx context.Context, handle orchestrator.Handle) error {
 	<-ctx.Done()
 	l.bestEffortDelete(handle.Ref)
@@ -137,29 +221,17 @@ func (l *Launcher) Launch(ctx context.Context, spec orchestrator.JobSpec, token 
 	return handle, l.Await(ctx, handle)
 }
 
-// createRequest builds the POST /sandboxes body: the runtime image and its
-// entrypoint, the shared ZZ_* injection map as the sandbox env (the cross-
-// substrate contract — identical to every other substrate), the observability
-// labels as metadata, and a self-reap timeout derived from the job deadline. The
-// ranking-model token, absent from the shared map because it is a secret, is
-// added here as a value (OpenSandbox is remote; the in-cluster Secret reference
-// does not apply).
-func (l *Launcher) createRequest(ctx context.Context, spec orchestrator.JobSpec, token string) createSandboxRequest {
-	env := runtimespec.Env(runtimespec.Options{
-		Image:      l.opts.Image,
-		ZZBaseURL:  l.opts.ZZBaseURL,
-		AIEndpoint: l.opts.AIEndpoint,
-		AIModel:    l.opts.AIModel,
-	}, spec, token)
-	if l.opts.AIToken != "" {
-		env[agent.EnvAIToken] = l.opts.AIToken
-	}
-
+// createRequest builds the POST /sandboxes body for a keep-alive sandbox: the
+// shell-bearing runtime image, the keep-alive entrypoint (so the container stays
+// up for the exec), resource limits, the observability labels as metadata, and a
+// self-reap timeout from the job deadline. The ZZ_* injection is NOT set here — it
+// rides the exec command in startRuntime, since the work runs as an exec, not the
+// container entrypoint (docs/adr/0027).
+func (l *Launcher) createRequest(ctx context.Context, spec orchestrator.JobSpec) createSandboxRequest {
 	req := createSandboxRequest{
 		Image:          &imageSpec{URI: l.opts.Image},
-		Entrypoint:     []string{runtimeEntrypoint},
+		Entrypoint:     keepAliveEntrypoint,
 		ResourceLimits: map[string]string{"cpu": l.opts.CPU, "memory": l.opts.Memory},
-		Env:            env,
 		Metadata:       runtimespec.Labels(spec),
 	}
 	if secs := timeoutSeconds(ctx); secs > 0 {
@@ -168,9 +240,9 @@ func (l *Launcher) createRequest(ctx context.Context, spec orchestrator.JobSpec,
 	return req
 }
 
-// bestEffortDelete schedules the sandbox for termination, logging (not failing)
-// on error since the sandbox self-reaps via its timeout regardless. It uses a
-// fresh short context because the caller's context is already done.
+// bestEffortDelete schedules the sandbox for termination, logging (not failing) on
+// error since the sandbox self-reaps via its timeout regardless. It uses a fresh
+// short context because the caller's context is often already done.
 func (l *Launcher) bestEffortDelete(id string) {
 	if id == "" {
 		return
@@ -180,6 +252,16 @@ func (l *Launcher) bestEffortDelete(id string) {
 	if err := l.client.deleteSandbox(ctx, id); err != nil && l.log != nil {
 		l.log.Warn("opensandbox: best-effort delete failed", "sandbox", id, "err", err)
 	}
+}
+
+// execdURL normalizes a resolved endpoint address into a base URL: the lifecycle
+// API may return a bare host:port (or a server-proxy path) with no scheme, so it
+// prepends http:// when absent (in-cluster execd is plain HTTP).
+func execdURL(endpoint string) string {
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		return endpoint
+	}
+	return "http://" + endpoint
 }
 
 // timeoutSeconds is the sandbox's self-reap TTL: the time left on the job's
