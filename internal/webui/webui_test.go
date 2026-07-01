@@ -81,12 +81,19 @@ func TestViewSelection(t *testing.T) {
 		}
 	})
 
-	t.Run("active pipeline shows processing even with items", func(t *testing.T) {
+	t.Run("active pass keeps the worklist visible and auto-refreshes", func(t *testing.T) {
 		store := worklist.NewMemoryStore()
 		store.Seed("u1", worklist.WorkItem{ID: "a", OwnerID: "u1", Meta: worklist.Metadata{Origin: worklist.OriginAgent}, GitHub: worklist.GitHubRef{UpdatedAt: time.Now()}})
 		h := handlerFor(user, store, &fakePipeline{active: true})
-		if d, _ := h.view(req); d.View != "processing" {
-			t.Errorf("view = %q, want processing (don't show a half-ranked list)", d.View)
+		d, _ := h.view(req)
+		if d.View != "worklist" {
+			t.Fatalf("view = %q, want worklist (a populated list must never blank to Discovering mid-refresh)", d.View)
+		}
+		if len(d.Items) == 0 {
+			t.Error("the existing items must stay on screen during a refresh pass")
+		}
+		if d.RefreshSecs == 0 {
+			t.Error("an active pass should auto-refresh the worklist so the new ranking lands")
 		}
 	})
 

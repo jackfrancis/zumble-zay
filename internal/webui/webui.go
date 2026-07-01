@@ -90,33 +90,25 @@ type pageData struct {
 }
 
 // Index handles GET /. It renders the sign-in view for anonymous visitors, the
-// processing view while a pass is in flight, or the ranked worklist once it
-// settles.
+// "Discovering" view while the first backfill populates an empty worklist, or the
+// ranked worklist (auto-refreshing in place while a background pass updates it).
 func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
 	data, status := h.view(r)
 	h.render(w, status, data)
 }
 
-// view selects what to render. The worklist is shown only once the user's
-// pipeline has settled — its last stage is llm-rank — so the user gets one clean
-// transition to the final ranking instead of watching a half-ranked list churn
-// (docs/adr/0016). While a pass is active the processing view polls via a meta
-// refresh; the settled worklist is static.
+// view selects what to render. The "processing" (Discovering) view is shown only
+// when there is nothing to display yet — the first backfill on an empty worklist.
+// Once items exist they stay on screen: a periodic refresh re-runs the ingest
+// pipeline to keep the radar in sync with GitHub (docs/adr/0022), and while that
+// pass is active the worklist keeps showing the last ranked list and auto-refreshes
+// so the updated ranking lands in place — it is never blanked back to Discovering
+// mid-refresh. (Showing processing whenever any pass was active predated the
+// periodic refresher and blanked a populated list every cycle.)
 func (h *Handler) view(r *http.Request) (pageData, int) {
 	user := h.sessions.CurrentUser(r)
 	if user == nil {
 		return pageData{View: "signin", Providers: h.providers.Providers()}, http.StatusOK
-	}
-
-	// A pass is running: keep showing processing and polling until it completes,
-	// rather than rendering an intermediate (e.g. only-ingested) list. A control
-	// plane that cannot be reached surfaces as the error view.
-	active, err := h.pipeline.Active(r.Context(), user.ID)
-	if err != nil {
-		return pageData{View: "error", User: user}, http.StatusBadGateway
-	}
-	if active {
-		return pageData{View: "processing", User: user, RefreshSecs: 3}, http.StatusOK
 	}
 
 	status, items, err := worklist.Resolve(r.Context(), h.store, h.pipeline, h.now(), user.ID, worklist.DefaultSort, true)
@@ -124,11 +116,19 @@ func (h *Handler) view(r *http.Request) (pageData, int) {
 		return pageData{View: "error", User: user}, http.StatusBadGateway
 	}
 	if status == worklist.StatusProcessing {
-		// Was empty; Resolve kicked off a backfill. Poll until it settles.
+		// Nothing to show yet: the first backfill is running. Poll until it lands.
 		return pageData{View: "processing", User: user, RefreshSecs: 3}, http.StatusOK
 	}
-	// Settled: the final ranked list, rendered once and left static.
-	return pageData{View: "worklist", User: user, Items: items, ConvEnabled: h.convEnabled}, http.StatusOK
+
+	// Items exist. If a foundation pass is refreshing them, keep the current ranked
+	// list visible and auto-refresh so the new ranking appears in place; never blank
+	// a populated worklist. A control-plane read failure just drops the refresh hint
+	// rather than hiding the list the user already has.
+	refresh := 0
+	if active, aerr := h.pipeline.Active(r.Context(), user.ID); aerr == nil && active {
+		refresh = 3
+	}
+	return pageData{View: "worklist", User: user, Items: items, ConvEnabled: h.convEnabled, RefreshSecs: refresh}, http.StatusOK
 }
 
 // Hide handles POST /items/hide. It marks the given item hidden for the signed-in
