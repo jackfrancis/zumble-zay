@@ -38,8 +38,11 @@ configMapGenerator:
       # DROP the runtime model token (the gateway holds the provider key). The
       # gateway's simplified LLM listener serves /chat/completions on :4000
       # (Service :80 -> :4000). If a bump changes that, fix this URL and
-      # agentgateway.yaml together.
-      - AI_ENDPOINT=http://zumble-zay-agentgateway/chat/completions
+      # agentgateway.yaml together. Use the FQDN (not the short name) so runtimes
+      # in ANOTHER namespace can resolve it: the OpenSandbox substrate spawns
+      # sandboxes in opensandbox-system (docs/adr/0027), and a short name only
+      # resolves in-namespace — silently dropping those jobs to the baseline ranker.
+      - AI_ENDPOINT=http://zumble-zay-agentgateway.zumble-zay.svc.cluster.local/chat/completions
       - AI_TOKEN_SECRET_NAME=
 
 images:
