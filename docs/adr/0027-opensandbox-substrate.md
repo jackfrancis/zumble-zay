@@ -92,10 +92,12 @@ exec** instead.
   and the completion callback land) plus the AI endpoint.
 - **Dev (kind): `LAUNCHER=opensandbox make dev-up`.** Experimental and additive
   (a bare `make dev-up` is byte-identical): it builds + loads the shell-bearing
-  runtime image (`Dockerfile.runtime-shell`), clones a pinned OpenSandbox checkout
-  and `helm install`s the controller + lifecycle server (Kubernetes runtime,
-  `batchsandbox` provider, a dev API key, the charts' default published images),
-  and sets the orchestrator's `OPENSANDBOX_*` env plus a cross-namespace
+  runtime image (`Dockerfile.runtime-shell`), `helm install`s the controller from
+  its **published chart release** (self-consistent with its image — the source
+  chart on a moving ref drifts ahead and passes flags the published binary
+  rejects) and the lifecycle server from a pinned source checkout (Kubernetes
+  runtime, `batchsandbox` provider, a dev API key, the charts' default published
+  images), and sets the orchestrator's `OPENSANDBOX_*` env plus a cross-namespace
   `RUNTIME_ZZ_BASE_URL` (sandboxes run in the OpenSandbox namespace, not the web
   tier's). `helm`/`git` are required; `AI_TOKEN` is left to the user (no Secret
   reference), so ranking falls back to the stub until set. Not yet validated

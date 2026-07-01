@@ -53,8 +53,14 @@ RUNTIME_SHELL_IMAGE ?= localhost/zumble-zay-runtime-shell:dev
 # under build/. EXPERIMENTAL: this stands up the full OpenSandbox platform
 # (controller + server, default published images the cluster pulls) and is not yet
 # validated end-to-end; expect to tune image pulls / the batchsandbox template per
-# cluster. helm + git are required. OPENSANDBOX_REF takes a branch or tag.
-OPENSANDBOX_REF ?= main
+# cluster. helm + git are required.
+# OPENSANDBOX_REF pins the SERVER chart source to the release matching the server
+# image (main's charts can drift ahead of the last published images, passing flags
+# the published binary rejects). The CONTROLLER is installed from its published
+# chart release (self-consistent with its image), not the source chart, to avoid
+# that skew.
+OPENSANDBOX_REF ?= server/v0.2.1
+OPENSANDBOX_CONTROLLER_CHART_VERSION ?= 0.2.0
 OPENSANDBOX_NAMESPACE ?= opensandbox-system
 OPENSANDBOX_API_KEY ?= zumble-zay-dev
 OPENSANDBOX_EXECD_IMAGE ?= sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20
@@ -176,18 +182,22 @@ kind-load-runtime-shell: image-runtime-shell-save
 	rm -f zumble-zay-runtime-shell-image.tar
 
 # EXPERIMENTAL (docs/adr/0027): install the OpenSandbox platform into the kind
-# cluster so LAUNCHER=opensandbox has a control plane to drive. Clones a pinned
-# OpenSandbox checkout (the server chart installs from local source), then helm
-# installs the controller (CRDs + operator) and the lifecycle server configured for
-# the Kubernetes runtime + batchsandbox provider with a dev API key, using the
-# charts' default published images (the cluster pulls them). Not yet validated
-# end-to-end; the OPENSANDBOX_* knobs above are overridable.
+# cluster so LAUNCHER=opensandbox has a control plane to drive. Installs the
+# controller (CRDs + operator) from its PUBLISHED chart release (self-consistent
+# with its image) and the lifecycle server from a pinned source checkout (the
+# server chart is local-source-only), configured for the Kubernetes runtime +
+# batchsandbox provider with a dev API key, using the charts' default published
+# images (the cluster pulls them). Not yet validated end-to-end; the OPENSANDBOX_*
+# knobs above are overridable.
 opensandbox-install:
 	@command -v helm >/dev/null || { echo "helm not installed (https://helm.sh)"; exit 1; }
 	rm -rf $(OPENSANDBOX_CLONE_DIR)
 	git clone --depth 1 --branch $(OPENSANDBOX_REF) https://github.com/opensandbox-group/OpenSandbox $(OPENSANDBOX_CLONE_DIR)
 	@kubectl create namespace $(OPENSANDBOX_NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
-	helm upgrade --install opensandbox-controller $(OPENSANDBOX_CLONE_DIR)/kubernetes/charts/opensandbox-controller \
+	# Controller from its PUBLISHED chart release (self-consistent with its image);
+	# the source chart on a moving ref can pass flags the published binary lacks.
+	helm upgrade --install opensandbox-controller \
+		https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/$(OPENSANDBOX_CONTROLLER_CHART_VERSION)/opensandbox-controller-$(OPENSANDBOX_CONTROLLER_CHART_VERSION).tgz \
 		--namespace $(OPENSANDBOX_NAMESPACE) --wait --timeout 300s
 	@printf 'server:\n  replicaCount: 1\nconfigToml: |\n  [server]\n  host = "0.0.0.0"\n  port = 80\n  api_key = "%s"\n  [log]\n  level = "INFO"\n  [runtime]\n  type = "kubernetes"\n  execd_image = "%s"\n  [kubernetes]\n  namespace = "%s"\n  workload_provider = "batchsandbox"\n  batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"\n  [egress]\n  image = "%s"\n  mode = "dns+nft"\n' \
 		"$(OPENSANDBOX_API_KEY)" "$(OPENSANDBOX_EXECD_IMAGE)" "$(OPENSANDBOX_NAMESPACE)" "$(OPENSANDBOX_EGRESS_IMAGE)" > $(OPENSANDBOX_CLONE_DIR)/zz-server-values.yaml
