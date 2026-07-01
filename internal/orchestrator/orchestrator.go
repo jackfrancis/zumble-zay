@@ -175,11 +175,16 @@ const (
 	// defaultRankJobTTL is the llm-rank budget. That stage makes one slow
 	// chat-model call per shortlisted item (seconds each, more with adaptive
 	// thinking), so it needs more headroom than the bounded GitHub fan-outs; a
-	// full pass otherwise approaches the general deadline. The per-item converse
-	// job shares this budget: it makes a live GitHub fetch plus one slow
-	// chat-model call (docs/adr/0019).
+	// full pass otherwise approaches the general deadline. The per-item research
+	// job shares this budget — a single reasoning pass (docs/adr/0022).
 	defaultRankJobTTL = 5 * time.Minute
-	queueDepth        = 128
+	// defaultConverseJobTTL is the budget for a per-item converse turn. Unlike the
+	// bounded rank/research passes it is an open-ended tool-using review loop
+	// (docs/adr/0019, 0020) whose model turns slow as they accumulate the PR's
+	// changed-file context, so a substantive review of a large PR needs materially
+	// more wall clock. Kept in step with agent.JobTimeout(github-converse).
+	defaultConverseJobTTL = 15 * time.Minute
+	queueDepth            = 128
 )
 
 // Orchestrator accepts ingestion requests and supervises agent runtimes.
@@ -548,11 +553,15 @@ func (o *Orchestrator) safeAwait(al AsyncLauncher, ctx context.Context, handle H
 	return al.Await(ctx, handle)
 }
 
-// deadlineFor returns the execution budget for a job type. The llm-rank and
-// per-item converse stages call a slow chat model, so they get more headroom
-// than the bounded GitHub API fan-outs. A larger configured jobTTL still wins.
+// deadlineFor returns the execution budget for a job type. The chat-model stages
+// get more headroom than the bounded GitHub API fan-outs — most of all the
+// per-item converse turn, an open-ended tool-using review loop. A larger
+// configured jobTTL still wins.
 func (o *Orchestrator) deadlineFor(t JobType) time.Duration {
-	if (t == JobLLMRank || t == JobGitHubConverse || t == JobGitHubResearch) && o.jobTTL < defaultRankJobTTL {
+	if t == JobGitHubConverse && o.jobTTL < defaultConverseJobTTL {
+		return defaultConverseJobTTL
+	}
+	if (t == JobLLMRank || t == JobGitHubResearch) && o.jobTTL < defaultRankJobTTL {
 		return defaultRankJobTTL
 	}
 	return o.jobTTL

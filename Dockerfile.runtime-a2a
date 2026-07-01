@@ -1,0 +1,28 @@
+# A2A runtime-server image for the kagent substrate (docs/adr/0024). Mirrors
+# Dockerfile.runtime; builds identically under docker and podman (no BuildKit-only
+# features). Unlike the one-shot runtime, this is a long-running server
+# (cmd/runtime-a2a) that kagent runs as a durable BYO Agent, executing each
+# dispatched job as an A2A message/send whose metadata carries the job params.
+
+# ---- build stage ----
+FROM golang:1.25 AS build
+WORKDIR /src
+
+# Cache dependencies first.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Build a static, stripped binary.
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/runtime-a2a ./cmd/runtime-a2a
+
+# ---- runtime stage ----
+# distroless static: no shell, non-root by default, ships CA certs for the
+# outbound HTTPS calls back to ZZ and to the providers. The server listens on
+# :8080 (kagent's readiness probe hits /.well-known/agent-card.json there) and is
+# configured by the ZZ_* environment for static config plus per-job A2A metadata.
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/runtime-a2a /runtime-a2a
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/runtime-a2a"]

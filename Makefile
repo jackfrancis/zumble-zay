@@ -2,7 +2,8 @@
         cluster-up cluster-down dev-up dev-down dev-forward dev-logs dev-logs-orchestrator \
         build-runtime image-runtime image-runtime-save kind-load-runtime \
         build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer \
-        image-runtime-shell image-runtime-shell-save kind-load-runtime-shell opensandbox-install
+        image-runtime-shell image-runtime-shell-save kind-load-runtime-shell opensandbox-install \
+        image-runtime-a2a image-runtime-a2a-save kind-load-runtime-a2a kagent-install
 
 BIN := bin/server
 
@@ -66,6 +67,17 @@ OPENSANDBOX_API_KEY ?= zumble-zay-dev
 OPENSANDBOX_EXECD_IMAGE ?= sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.0.20
 OPENSANDBOX_EGRESS_IMAGE ?= sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:v1.1.3
 OPENSANDBOX_CLONE_DIR := build/opensandbox
+
+# Runtime image for the kagent substrate (docs/adr/0024): the cmd/runtime-a2a
+# server (the ZZ runtime behind an A2A endpoint), run by kagent as a durable BYO
+# Agent. Unlike the pod runtimes it is a long-running server, not a one-shot job.
+RUNTIME_A2A_IMAGE ?= localhost/zumble-zay-runtime-a2a:dev
+# kagent (LAUNCHER=kagent) dev-install knobs — all overridable. kagent installs
+# from its published OCI Helm charts; the controller's model provider is a dummy
+# because the ZZ BYO agent routes its model calls through the agentgateway
+# (ZZ_AI_ENDPOINT), not kagent's own ModelConfig.
+KAGENT_VERSION ?= 0.9.11
+KAGENT_NAMESPACE ?= kagent
 
 # Vendored GitHub Primer CSS (the UI's design system, served from the binary).
 # `make vendor-primer` refreshes these at the pinned versions; bump the versions
@@ -181,6 +193,20 @@ kind-load-runtime-shell: image-runtime-shell-save
 	kind load image-archive zumble-zay-runtime-shell-image.tar --name $(KIND_CLUSTER)
 	rm -f zumble-zay-runtime-shell-image.tar
 
+# Build the A2A runtime-server image for the kagent substrate (docs/adr/0024).
+image-runtime-a2a: engine
+	$(CONTAINER_ENGINE) build -f Dockerfile.runtime-a2a -t $(RUNTIME_A2A_IMAGE) .
+
+# Export the A2A runtime image to a portable archive.
+image-runtime-a2a-save: image-runtime-a2a
+	$(CONTAINER_ENGINE) save $(RUNTIME_A2A_IMAGE) -o zumble-zay-runtime-a2a-image.tar
+
+# Load the A2A runtime image into kind so the kagent BYO Agent resolves it without
+# a registry pull. Run before exercising LAUNCHER=kagent (docs/adr/0024).
+kind-load-runtime-a2a: image-runtime-a2a-save
+	kind load image-archive zumble-zay-runtime-a2a-image.tar --name $(KIND_CLUSTER)
+	rm -f zumble-zay-runtime-a2a-image.tar
+
 # EXPERIMENTAL (docs/adr/0027): install the OpenSandbox platform into the kind
 # cluster so LAUNCHER=opensandbox has a control plane to drive. Installs the
 # controller (CRDs + operator) from its PUBLISHED chart release (self-consistent
@@ -203,6 +229,22 @@ opensandbox-install:
 		"$(OPENSANDBOX_API_KEY)" "$(OPENSANDBOX_EXECD_IMAGE)" "$(OPENSANDBOX_NAMESPACE)" "$(OPENSANDBOX_EGRESS_IMAGE)" > $(OPENSANDBOX_CLONE_DIR)/zz-server-values.yaml
 	helm upgrade --install opensandbox-server $(OPENSANDBOX_CLONE_DIR)/kubernetes/charts/opensandbox-server \
 		--namespace $(OPENSANDBOX_NAMESPACE) -f $(OPENSANDBOX_CLONE_DIR)/zz-server-values.yaml --wait --timeout 300s
+
+# Install kagent into the kind cluster so LAUNCHER=kagent has a control plane to
+# dispatch to (docs/adr/0024): the published CRDs + controller Helm charts (with a
+# dummy model provider — the ZZ BYO agent routes model calls through the
+# agentgateway, not kagent's ModelConfig), then the zz-runtime BYO Agent, which
+# kagent reconciles into the durable Deployment the orchestrator dispatches to.
+# The Agent's image must be kind-loaded first (dev-up does this).
+kagent-install:
+	@command -v helm >/dev/null || { echo "helm not installed (https://helm.sh)"; exit 1; }
+	helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
+		--version $(KAGENT_VERSION) --namespace $(KAGENT_NAMESPACE) --create-namespace --wait --timeout 300s
+	helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
+		--version $(KAGENT_VERSION) --namespace $(KAGENT_NAMESPACE) \
+		--set providers.default=openAI --set providers.openAI.apiKey=sk-kagent-dev-unused \
+		--wait --timeout 360s
+	kubectl apply -f deploy/k8s/kagent/zz-runtime-agent.yaml
 
 # Export the orchestrator image to a portable archive (docs/adr/0023).
 image-orchestrator-save: image-orchestrator
@@ -294,6 +336,16 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 		echo "loading shell runtime image + installing OpenSandbox (experimental)"; \
 		$(MAKE) kind-load-runtime-shell opensandbox-install; \
 	fi
+	# Optional kagent substrate (docs/adr/0024): load the A2A runtime-server image
+	# and install kagent (control plane + the zz-runtime BYO Agent) so the
+	# orchestrator can dispatch jobs to a durable agent. Only when selected. The
+	# orchestrator's LAUNCHER + KAGENT_* defaults (kagent-controller.kagent, the
+	# zz-runtime agent) need no extra env, so the generic LAUNCHER override below is
+	# all the orchestrator wiring required.
+	@if [ "$(LAUNCHER)" = "kagent" ]; then \
+		echo "loading A2A runtime image + installing kagent"; \
+		$(MAKE) kind-load-runtime-a2a kagent-install; \
+	fi
 	kubectl apply -k deploy/k8s/overlays/dev
 	# Select the launcher on the orchestrator when it differs from the ConfigMap
 	# default (k8s-job): an explicit container env wins over envFrom, so this
@@ -323,6 +375,15 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	kubectl -n $(KUBE_NS) rollout restart deploy/zumble-zay deploy/zumble-zay-orchestrator
 	kubectl -n $(KUBE_NS) rollout status deploy/zumble-zay --timeout=120s
 	kubectl -n $(KUBE_NS) rollout status deploy/zumble-zay-orchestrator --timeout=120s
+	# On a re-run the zz-runtime agent image (:dev) is mutable, so kagent's
+	# Deployment keeps the old code until restarted — mirror the web/orchestrator
+	# rollout for the durable agent. Best-effort: on the very first install the
+	# Deployment may not exist yet (the kagent controller reconciles it
+	# asynchronously), and the next dev-up adopts the reloaded image.
+	@if [ "$(LAUNCHER)" = "kagent" ]; then \
+		echo "restarting the zz-runtime agent to adopt the reloaded image"; \
+		kubectl -n $(KAGENT_NAMESPACE) rollout restart deploy/zz-runtime 2>/dev/null || true; \
+	fi
 	@echo
 	@echo "zumble-zay is running. Expose it with:  make dev-forward"
 	@echo "then:  curl localhost:8080/healthz"

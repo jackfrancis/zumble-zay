@@ -157,7 +157,7 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   controller installs) are additive, never edits to the base defaults (`LAUNCHER`
   stays `k8s-job`). Reserve the next free ADR number and add its README row in
   your first PR so two efforts don't claim the same one — reserved so far:
-  **0027** opensandbox, **0028** ray/kuberay.
+  **0027** opensandbox, **0028** ray/kuberay, **0029** kagent.
 
 ## Build / dev / test
 
@@ -207,7 +207,7 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    detached completion with native self-reap, gated behind `//go:build
    agent_sandbox` and selected with `LAUNCHER=agent-sandbox`; the shared runtime
    shape moved to `internal/runtimespec`. Remaining: `KueueLauncher`
-   (admission/quota) and `KagentLauncher`. The plumbing is in place (ADR 0024): a
+   (admission/quota). The plumbing is in place (ADR 0024): a
    launcher
    **registry** (`internal/launcher`, driver pattern — implement `Launcher`,
    `Register` from a package init, blank-import in `cmd/orchestrator`), **async**
@@ -229,6 +229,22 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    (platform OIDC) for token exchange. An await-the-deadline launcher
    (`k8s-pod-detached`) is the in-cluster reference for a fully detached substrate
    — dispatch + callback-only completion, create-only RBAC, deadline backstop.
+   **DONE — `kagent` (ADR 0029):** `internal/kagent` is the first *durable*-runtime
+   substrate — the launcher dispatches over A2A JSON-RPC to a **standing** BYO
+   agent the kagent controller reconciles (ZZ is a client of the controller, so
+   **no pod/job RBAC**), via a hand-rolled `net/http` client (no new module, no
+   build tag; `KAGENT_ENDPOINT`/`KAGENT_AGENT_NAMESPACE`/`KAGENT_AGENT_NAME` read in
+   `build()`, so `internal/config` is untouched). The runtime side wraps `agent.Run`
+   behind an A2A server (`internal/agenta2a` + `cmd/runtime-a2a`), reusing
+   `agent.ParamsFromEnv` verbatim; per-job params + the short-TTL job token ride in
+   `message.metadata` (the controller strips headers but forwards metadata), static
+   config on the durable Deployment env. Because the controller caps a blocking
+   `message/send` at ~180s, it is an `AsyncLauncher`: the runtime runs the job
+   detached (its own deadline, `blocking:false`) and completion is the callback race
+   (ADR 0025), so the A2A task result is irrelevant. Converse and rank are one
+   archetype on the standing agent; converse has its own 15-min budget. Select with
+   `LAUNCHER=kagent`. Remaining: the token-exchange pull-path (keep the token out of
+   kagent's persisted task history) and `KueueLauncher` (admission/quota).
 7. **Prompt & context tuning is now the primary correctness lever (ADR 0015).**
    The LLM is authoritative for the four axes, so ranking quality is steered in
    `internal/llm/prompt.go` — sharper axis definitions, the user's priorities and

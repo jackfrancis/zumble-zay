@@ -65,6 +65,13 @@ const (
 const (
 	defaultJobTimeout = 2 * time.Minute
 	rankJobTimeout    = 5 * time.Minute
+	// converseJobTimeout is the budget for a per-item assistive conversation turn
+	// (docs/adr/0019, 0020). Unlike the bounded rank/research passes it is an
+	// open-ended tool-using review loop — it reads the live PR and its changed
+	// files, and each model turn grows slower as that context accumulates — so a
+	// substantive review of a large PR needs materially more wall clock. Interactive
+	// latency is the tradeoff; kept in step with orchestrator.deadlineFor.
+	converseJobTimeout = 15 * time.Minute
 )
 
 // JobTimeout returns the wall-clock budget a standalone runtime should allow for
@@ -72,10 +79,14 @@ const (
 // bounded by the orchestrator's per-stage deadline instead; the two are kept in
 // step so a job has the same budget on either substrate.
 func JobTimeout(jobType string) time.Duration {
-	if jobType == JobRank || jobType == JobConverse || jobType == JobResearch {
+	switch jobType {
+	case JobConverse:
+		return converseJobTimeout
+	case JobRank, JobResearch:
 		return rankJobTimeout
+	default:
+		return defaultJobTimeout
 	}
-	return defaultJobTimeout
 }
 
 // Run is the single runtime entrypoint: it executes the job selected by

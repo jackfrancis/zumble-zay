@@ -1,0 +1,34 @@
+# The Zumble-Zay agent runtime as a durable kagent BYO Agent (docs/adr/0024).
+# kagent reconciles this into a long-lived Deployment that speaks A2A; the
+# orchestrator's kagent launcher dispatches each job to it as an A2A message/send
+# whose metadata carries the per-job parameters and the ZZ-minted job token.
+#
+# This resource holds only the STATIC configuration — the per-job values (job
+# type, token, provider, item) ride the task metadata, so they are absent here:
+#   - ZZ_BASE_URL   the web tier, by FQDN: the agent runs in the kagent namespace
+#                   and ZZ in zumble-zay, so a short name would not resolve.
+#   - ZZ_AI_ENDPOINT the in-cluster agentgateway, which holds the provider key and
+#                   injects it — so no model token is set here (and none has to
+#                   cross namespaces).
+#
+# Dev-only scaffolding: the image and FQDNs match `make dev-up`'s dev overlay.
+# Applied by `make kagent-install` (LAUNCHER=kagent) after the image is kind-loaded.
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: zz-runtime
+  namespace: kagent
+spec:
+  description: Zumble-Zay agent runtime (A2A BYO) — runs ingest/enrich/rank/converse/research jobs dispatched by the ZZ orchestrator.
+  type: BYO
+  byo:
+    deployment:
+      image: localhost/zumble-zay-runtime-a2a:dev
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: ZZ_BASE_URL
+          value: http://zumble-zay.zumble-zay.svc.cluster.local:8080
+        - name: ZZ_AI_ENDPOINT
+          value: http://zumble-zay-agentgateway.zumble-zay.svc.cluster.local/chat/completions
+        - name: ZZ_AI_MODEL
+          value: claude-opus-4.8
