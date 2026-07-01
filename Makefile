@@ -88,6 +88,10 @@ KAGENT_NAMESPACE ?= kagent
 KUBERAY_VERSION  ?= 1.1.1
 RAY_IMAGE        ?= localhost/zz-ray:dev
 RAY_CLUSTER_NAME ?= zz-ray
+# Opt-in Ray-actors llm-rank path (docs/adr/0029). Set to true to run llm-rank as
+# a Python @ray.remote actors program instead of /runtime; empty leaves it on
+# /runtime (the ADR 0028 default).
+RAY_LLM_RANK_ACTORS ?=
 # When LAUNCHER=ray, dev-up additionally builds+loads the Ray image; empty
 # otherwise, so a default dev-up is unchanged.
 DEV_UP_RAY_PREREQ = $(if $(filter ray,$(LAUNCHER)),kind-load-ray,)
@@ -414,9 +418,12 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime $(DEV_UP_R
 			RUNTIME_ZZ_BASE_URL=http://zumble-zay.$(KUBE_NS).svc.cluster.local:8080; \
 	fi
 	# The ray launcher needs the standing cluster's name/namespace (docs/adr/0028).
+	# RAY_LLM_RANK_ACTORS=true additionally selects the Ray-actors llm-rank path
+	# (docs/adr/0029); default empty leaves llm-rank on /runtime.
 	@if [ "$(LAUNCHER)" = "ray" ]; then \
 		kubectl -n $(KUBE_NS) set env deploy/zumble-zay-orchestrator \
-			RAY_CLUSTER=$(RAY_CLUSTER_NAME) RAY_NAMESPACE=$(KUBE_NS); \
+			RAY_CLUSTER=$(RAY_CLUSTER_NAME) RAY_NAMESPACE=$(KUBE_NS) \
+			RAY_LLM_RANK_ACTORS=$(RAY_LLM_RANK_ACTORS); \
 	fi
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is

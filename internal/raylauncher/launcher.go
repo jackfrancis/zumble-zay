@@ -39,6 +39,13 @@ const (
 	// defaultEntrypoint is the runtime binary the RayJob runs on the cluster; the
 	// RayCluster image must provide it (docs/adr/0028).
 	defaultEntrypoint = "/runtime"
+	// actorsEntrypoint runs the Ray-actors llm-rank program instead of /runtime,
+	// used when the launcher is in actor mode for llm-rank jobs (docs/adr/0029).
+	// The RayCluster image must provide it (baked by deploy/ray/Dockerfile.ray).
+	actorsEntrypoint = "python /llm_rank_ray.py"
+	// llmRankJobType is the JobType whose scoring the actor path parallelizes
+	// across the cluster (mirrors orchestrator.JobLLMRank).
+	llmRankJobType    = "llm-rank"
 	defaultTTLSeconds = int64(300)
 )
 
@@ -84,6 +91,11 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 			ttl = n
 		}
 	}
+	// Actor mode: run llm-rank as a Ray-actors Python program that parallelizes
+	// scoring across the cluster, instead of the /runtime batch binary
+	// (docs/adr/0029). Opt-in and scoped to llm-rank; every other job type still
+	// runs /runtime.
+	llmRankActors := strings.EqualFold(strings.TrimSpace(os.Getenv("RAY_LLM_RANK_ACTORS")), "true")
 
 	opts := runtimespec.Options{
 		Image:          cfg.Runtime.Image,
@@ -97,16 +109,18 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 	}
 	if log != nil {
 		log.Info("using ray launcher",
-			"namespace", namespace, "cluster", cluster, "entrypoint", entrypoint, "zz_base_url", opts.ZZBaseURL)
+			"namespace", namespace, "cluster", cluster, "entrypoint", entrypoint,
+			"llm_rank_actors", llmRankActors, "zz_base_url", opts.ZZBaseURL)
 	}
 	return &Launcher{
-		client:     dyn,
-		namespace:  namespace,
-		cluster:    cluster,
-		entrypoint: entrypoint,
-		ttlSeconds: ttl,
-		opts:       opts,
-		poll:       3 * time.Second,
+		client:        dyn,
+		namespace:     namespace,
+		cluster:       cluster,
+		entrypoint:    entrypoint,
+		llmRankActors: llmRankActors,
+		ttlSeconds:    ttl,
+		opts:          opts,
+		poll:          3 * time.Second,
 	}, nil
 }
 
@@ -114,13 +128,14 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 // (docs/adr/0028). Only the thin CR envelope is unstructured; the ZZ_* injection
 // contract is the same map every substrate uses, rendered into runtimeEnvYAML.
 type Launcher struct {
-	client     dynamic.Interface
-	namespace  string
-	cluster    string
-	entrypoint string
-	ttlSeconds int64
-	opts       runtimespec.Options
-	poll       time.Duration
+	client        dynamic.Interface
+	namespace     string
+	cluster       string
+	entrypoint    string
+	llmRankActors bool
+	ttlSeconds    int64
+	opts          runtimespec.Options
+	poll          time.Duration
 }
 
 var (
@@ -199,12 +214,23 @@ func (l *Launcher) rayJob(spec orchestrator.JobSpec, token string) *unstructured
 	u.SetNamespace(l.namespace)
 	u.SetLabels(runtimespec.Labels(spec))
 
-	_ = unstructured.SetNestedField(u.Object, l.entrypoint, "spec", "entrypoint")
+	_ = unstructured.SetNestedField(u.Object, l.entrypointFor(spec), "spec", "entrypoint")
 	_ = unstructured.SetNestedField(u.Object, runtimeEnvYAML(env), "spec", "runtimeEnvYAML")
 	_ = unstructured.SetNestedField(u.Object, true, "spec", "shutdownAfterJobFinishes")
 	_ = unstructured.SetNestedField(u.Object, l.ttlSeconds, "spec", "ttlSecondsAfterFinished")
 	_ = unstructured.SetNestedStringMap(u.Object, map[string]string{clusterSelectorKey: l.cluster}, "spec", "clusterSelector")
 	return u
+}
+
+// entrypointFor selects the RayJob entrypoint for a job. In actor mode, an
+// llm-rank job runs the Ray-actors Python program that parallelizes scoring
+// across the cluster (docs/adr/0029); every other job type — and all jobs when
+// actor mode is off — runs the configured /runtime batch binary (docs/adr/0028).
+func (l *Launcher) entrypointFor(spec orchestrator.JobSpec) string {
+	if l.llmRankActors && string(spec.Type) == llmRankJobType {
+		return actorsEntrypoint
+	}
+	return l.entrypoint
 }
 
 // runtimeEnvYAML renders the per-job environment as a Ray runtimeEnv document.

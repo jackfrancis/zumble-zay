@@ -34,6 +34,38 @@ func testLauncher() *Launcher {
 	}
 }
 
+// TestEntrypointActorModeForLLMRank verifies that actor mode swaps the entrypoint
+// to the Ray-actors program for llm-rank jobs only, leaving other job types on
+// /runtime and leaving the default (non-actor) launcher entirely on /runtime
+// (docs/adr/0029).
+func TestEntrypointActorModeForLLMRank(t *testing.T) {
+	base := testLauncher()
+
+	// Default launcher: every job type uses /runtime.
+	if got := base.entrypointFor(orchestrator.JobSpec{Type: "llm-rank"}); got != defaultEntrypoint {
+		t.Errorf("non-actor llm-rank entrypoint = %q, want %q", got, defaultEntrypoint)
+	}
+
+	// Actor mode: llm-rank uses the Python actors program; others stay on /runtime.
+	actor := testLauncher()
+	actor.llmRankActors = true
+	if got := actor.entrypointFor(orchestrator.JobSpec{Type: "llm-rank"}); got != actorsEntrypoint {
+		t.Errorf("actor-mode llm-rank entrypoint = %q, want %q", got, actorsEntrypoint)
+	}
+	for _, jt := range []string{"github-ingest", "github-enrich", "github-converse"} {
+		if got := actor.entrypointFor(orchestrator.JobSpec{Type: orchestrator.JobType(jt)}); got != defaultEntrypoint {
+			t.Errorf("actor-mode %s entrypoint = %q, want %q (only llm-rank switches)", jt, got, defaultEntrypoint)
+		}
+	}
+
+	// And the CR reflects it end-to-end.
+	u := actor.rayJob(orchestrator.JobSpec{Type: "llm-rank", ActingUserID: "u1"}, "tok")
+	ep, _, _ := unstructured.NestedString(u.Object, "spec", "entrypoint")
+	if ep != actorsEntrypoint {
+		t.Errorf("actor-mode rayJob entrypoint = %q, want %q", ep, actorsEntrypoint)
+	}
+}
+
 // TestRayJobEmbedsRuntimeContract is the cross-substrate regression check: the
 // RayJob carries the identical ZZ_* injection contract as the Job, Pod, and
 // Sandbox launchers — here inside spec.runtimeEnvYAML rather than a pod, since a
