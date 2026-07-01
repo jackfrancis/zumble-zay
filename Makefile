@@ -242,6 +242,24 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets -o jsonpath='{.data.CONTROL_PLANE_TOKEN}' 2>/dev/null | grep -q . || \
 		kubectl -n $(KUBE_NS) patch secret zumble-zay-secrets --type merge \
 			-p "{\"stringData\":{\"CONTROL_PLANE_TOKEN\":\"$$(openssl rand -base64 48 | tr -d '\n')\"}}"
+	# The dev overlay always runs the agentgateway as the agents' LLM egress proxy,
+	# and it resolves the provider key from zumble-zay-secrets/AI_TOKEN at startup.
+	# Unlike SESSION_SECRET/CONTROL_PLANE_TOKEN, this key cannot be generated — it is
+	# a real provider credential. A missing key hard-fails the gateway pod
+	# (CreateContainerConfigError), which drops every runtime to the stub ranker.
+	# Seed it from $$AI_TOKEN when exported (idempotent — patched in even on a
+	# pre-existing secret), and warn clearly when it is absent so the failure is not
+	# a mystery on a fresh cluster.
+	@if [ -n "$$AI_TOKEN" ]; then \
+		kubectl -n $(KUBE_NS) patch secret zumble-zay-secrets --type merge \
+			-p "{\"stringData\":{\"AI_TOKEN\":\"$$AI_TOKEN\"}}" >/dev/null && \
+		echo "seeded AI_TOKEN into zumble-zay-secrets (agentgateway provider key)"; \
+	elif ! kubectl -n $(KUBE_NS) get secret zumble-zay-secrets -o jsonpath='{.data.AI_TOKEN}' 2>/dev/null | grep -q .; then \
+		echo "WARNING: zumble-zay-secrets has no AI_TOKEN and \$$AI_TOKEN is unset;"; \
+		echo "         the agentgateway pod will stay in CreateContainerConfigError and"; \
+		echo "         runtimes will fall back to the stub ranker. Enable model ranking with:"; \
+		echo "           export AI_TOKEN=<provider key> && make dev-up"; \
+	fi
 	# Optional agent-sandbox substrate: install its controller + CRDs so the
 	# orchestrator can create Sandboxes (docs/adr/0026). Only when selected; the
 	# CRD wait is best-effort so a slow controller rollout does not fail dev-up.
