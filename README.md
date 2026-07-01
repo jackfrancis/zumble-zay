@@ -110,19 +110,28 @@ make dev-logs      # tail application logs
 ### Enable OAuth login (optional)
 
 The app starts without provider credentials (health and auth-listing endpoints
-work; login does not). To enable a provider, add its credentials to the Secret
-and restart the rollout:
+work; login does not) — that is the "No sign-in providers are configured" state
+on the landing page. Provider creds come from a real OAuth App registration (for
+GitHub, https://github.com/settings/developers) whose callback URL is
+`${BASE_URL}/auth/<provider>/callback` (dev: `http://localhost:8080/auth/github/callback`).
+
+For local dev, export the creds and let `make dev-up` seed them into the Secret:
 
 ```sh
-kubectl -n zumble-zay create secret generic zumble-zay-secrets \
-  --from-literal=SESSION_SECRET="$(openssl rand -base64 48)" \
-  --from-literal=GITHUB_CLIENT_ID=... --from-literal=GITHUB_CLIENT_SECRET=... \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n zumble-zay rollout restart deploy/zumble-zay
+export GITHUB_CLIENT_ID=<your client id>
+export GITHUB_CLIENT_SECRET=<your client secret>
+make dev-up
 ```
 
-Set each provider's OAuth redirect URI to `${BASE_URL}/auth/<provider>/callback`
-(for the dev overlay, `http://localhost:8080/auth/github/callback`).
+`dev-up` seeds any exported `GITHUB_`/`GOOGLE_`/`MICROSOFT_CLIENT_ID` +
+`_CLIENT_SECRET` (unset providers stay disabled). To add them to an
+already-running cluster instead, merge-patch the Secret and restart the web tier:
+
+```sh
+kubectl -n zumble-zay patch secret zumble-zay-secrets --type merge \
+  -p '{"stringData":{"GITHUB_CLIENT_ID":"<id>","GITHUB_CLIENT_SECRET":"<secret>"}}'
+kubectl -n zumble-zay rollout restart deploy/zumble-zay
+```
 
 ### Enable model ranking (optional)
 

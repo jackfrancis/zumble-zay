@@ -260,6 +260,25 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 		echo "         runtimes will fall back to the stub ranker. Enable model ranking with:"; \
 		echo "           export AI_TOKEN=<provider key> && make dev-up"; \
 	fi
+	# OAuth provider credentials are external app registrations (a GitHub OAuth App,
+	# etc.), so like AI_TOKEN dev-up cannot generate them -- it can only relay what
+	# you already have. Seed each provider client ID/secret from the environment when
+	# exported, so exporting GITHUB_CLIENT_ID + GITHUB_CLIENT_SECRET before a fresh
+	# dev-up wires login with no manual patch. Unset keys are skipped (that provider
+	# stays disabled); the merge patch leaves every other secret key untouched.
+	@for k in GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET MICROSOFT_CLIENT_ID MICROSOFT_CLIENT_SECRET; do \
+		v=$$(printenv "$$k" || true); \
+		if [ -n "$$v" ]; then \
+			kubectl -n $(KUBE_NS) patch secret zumble-zay-secrets --type merge \
+				-p "{\"stringData\":{\"$$k\":\"$$v\"}}" >/dev/null && \
+			echo "seeded $$k into zumble-zay-secrets"; \
+		fi; \
+	done
+	# A missing GitHub client ID just means login is off (an intended mode), so this
+	# is a gentle note, not a failure -- it is the exact "No sign-in providers are
+	# configured" state the landing page shows.
+	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets -o jsonpath='{.data.GITHUB_CLIENT_ID}' 2>/dev/null | grep -q . || \
+		echo "note: GITHUB_CLIENT_ID unset -- sign-in stays disabled; export GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET and re-run dev-up to enable login"
 	# Optional agent-sandbox substrate: install its controller + CRDs so the
 	# orchestrator can create Sandboxes (docs/adr/0026). Only when selected; the
 	# CRD wait is best-effort so a slow controller rollout does not fail dev-up.
