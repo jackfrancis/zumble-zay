@@ -67,3 +67,21 @@ RayCluster.
 - Non-goals unchanged: no Ray Serve, no long-lived actors across jobs — the
   actors live only for the duration of one llm-rank job, then the RayJob
   self-reaps (`shutdownAfterJobFinishes`).
+
+## Observability
+The actors path is observable through Ray's standard tooling (no bespoke
+instrumentation): the Ray dashboard (`svc/zz-ray-head-svc:8265`) shows the job
+and its `Scorer` actors, and Ray's Prometheus metrics (`:8080/metrics`) expose
+per-actor series such as `ray::Scorer.score` under `ray_component_*`. The
+repository documents the **official KubeRay** Prometheus/Grafana install
+(kube-prometheus-stack + KubeRay `PodMonitor`s + Ray's Grafana dashboards) in
+`deploy/ray/monitoring/README.md`, rather than a hand-rolled Prometheus.
+
+## Validation
+Verified end-to-end on a local kind + KubeRay cluster: an `llm-rank` RayJob ran
+`python /llm_rank_ray.py`, spawned four `Scorer` actors across the head and
+worker nodes, and scored the full worklist via Copilot — `scored 22/22 items via
+4 Ray actors`. The model call goes through the dev overlay's agentgateway
+(`ZZ_AI_ENDPOINT`), which holds the provider credential (ADR 0006); the actors
+therefore need no token of their own on the dev path.
+

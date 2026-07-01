@@ -35,7 +35,8 @@ ZZ_BASE_URL = os.environ["ZZ_BASE_URL"].rstrip("/")
 ZZ_JOB_TOKEN = os.environ["ZZ_JOB_TOKEN"]
 AI_ENDPOINT = os.environ.get("ZZ_AI_ENDPOINT", "https://api.githubcopilot.com/chat/completions")
 AI_MODEL = os.environ.get("ZZ_AI_MODEL", "claude-opus-4.8")
-AI_TOKEN = os.environ.get("ZZ_AI_TOKEN", "")
+# The model token is read per-actor from ZZ_AI_TOKEN on the actor's own node
+# (see Scorer.__init__); it is intentionally not read here at driver scope.
 # Public, non-secret integration id required by the Copilot endpoint; ignored by
 # other OpenAI-compatible providers (mirrors internal/llm/ranker.go).
 COPILOT_INTEGRATION_ID = "copilot-developer-cli"
@@ -94,13 +95,17 @@ class Scorer:
     Each actor holds its own HTTP setup and runs on whatever node Ray schedules
     it onto, so a pool of these scores the worklist in parallel ACROSS the
     cluster — the intra-job parallelism the Go /runtime path does not have.
+
+    The model token is read from THIS actor's own node env (ZZ_AI_TOKEN), which
+    every RayCluster pod carries (docs/adr/0028, 0029) — so the token never has
+    to travel through the driver or the per-job CR.
     """
 
-    def __init__(self, endpoint, model, token, integration_id):
+    def __init__(self, endpoint, model, integration_id):
         self.endpoint = endpoint
         self.model = model
-        self.token = token
         self.integration_id = integration_id
+        self.token = os.environ.get("ZZ_AI_TOKEN", "")
 
     def score(self, item):
         """Return (item_id, proposal_dict) or (item_id, None) on any failure.
@@ -109,6 +114,10 @@ class Scorer:
         the item unchanged rather than failing the whole job.
         """
         item_id = item.get("id")
+        if not self.token:
+            print(f"scorer: item {item_id} skipped: no ZZ_AI_TOKEN on this node",
+                  file=sys.stderr)
+            return item_id, None
         body = json.dumps(
             {
                 "model": self.model,
@@ -165,12 +174,9 @@ def _zz_post(path, payload):
 
 
 def main():
-    if not AI_TOKEN:
-        print("llm_rank_ray: ZZ_AI_TOKEN is empty; the cluster must carry it "
-              "(docs/adr/0028). Exiting.", file=sys.stderr)
-        sys.exit(1)
-
-    # Join the standing RayCluster this entrypoint runs on.
+    # Join the standing RayCluster this entrypoint runs on. The model token is NOT
+    # required by the driver — each Scorer actor reads ZZ_AI_TOKEN from its own
+    # node env (docs/adr/0029) — so the driver only needs the ZZ contract.
     ray.init(address="auto")
 
     items = _zz_get("/agent/worklist").get("items", [])
@@ -182,7 +188,7 @@ def main():
     # the items across them and gather the proposals in parallel.
     n = min(NUM_SCORERS, len(items))
     scorers = [
-        Scorer.remote(AI_ENDPOINT, AI_MODEL, AI_TOKEN, COPILOT_INTEGRATION_ID)
+        Scorer.remote(AI_ENDPOINT, AI_MODEL, COPILOT_INTEGRATION_ID)
         for _ in range(n)
     ]
     futures = [scorers[i % n].score.remote(item) for i, item in enumerate(items)]

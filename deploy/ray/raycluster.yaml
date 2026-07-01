@@ -54,3 +54,13 @@ spec:
               resources:
                 requests: {cpu: "500m", memory: "1Gi"}
                 limits: {cpu: "1", memory: "2Gi"}
+              env:
+                # Workers carry the model token too, so Ray-actors llm-rank
+                # scoring (docs/adr/0029) works on whichever node an actor lands.
+                # Optional so the worker starts without it.
+                - name: ZZ_AI_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: zumble-zay-secrets
+                      key: AI_TOKEN
+                      optional: true

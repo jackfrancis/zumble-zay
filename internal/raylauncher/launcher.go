@@ -103,9 +103,18 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 		ServiceAccount: cfg.Runtime.ServiceAccount,
 		AIEndpoint:     cfg.AI.Endpoint,
 		AIModel:        cfg.AI.Model,
-		// AITokenSecretName/Key intentionally omitted: the ranking-model token is
-		// carried by the standing RayCluster's pods, never placed in the plaintext
-		// runtimeEnvYAML of a per-job CR (docs/adr/0028).
+		// AITokenSecretName/Key intentionally omitted: for the /runtime path the
+		// ranking-model token is carried by the standing RayCluster's pods, never
+		// placed in the plaintext runtimeEnvYAML of a per-job CR (docs/adr/0028).
+	}
+	// The actors path is the one exception (docs/adr/0029): Ray's runtime_env does
+	// not reliably propagate the cluster pod's ZZ_AI_TOKEN into actor processes,
+	// so for actor-mode llm-rank the launcher injects the token — which the
+	// orchestrator already holds in its own env — into the RayJob runtime_env,
+	// the only delivery Ray guarantees reaches actors. Scoped to that path only.
+	aiToken := ""
+	if llmRankActors {
+		aiToken = cfg.AI.Token
 	}
 	if log != nil {
 		log.Info("using ray launcher",
@@ -118,6 +127,7 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 		cluster:       cluster,
 		entrypoint:    entrypoint,
 		llmRankActors: llmRankActors,
+		aiToken:       aiToken,
 		ttlSeconds:    ttl,
 		opts:          opts,
 		poll:          3 * time.Second,
@@ -133,6 +143,7 @@ type Launcher struct {
 	cluster       string
 	entrypoint    string
 	llmRankActors bool
+	aiToken       string
 	ttlSeconds    int64
 	opts          runtimespec.Options
 	poll          time.Duration
@@ -206,6 +217,12 @@ func (l *Launcher) rayJob(spec orchestrator.JobSpec, token string) *unstructured
 		AIEndpoint:    l.opts.AIEndpoint,
 		AIModel:       l.opts.AIModel,
 	})
+	// Actor-mode llm-rank only: deliver the model token to the actors via the
+	// RayJob runtime_env, the one channel Ray guarantees reaches actor processes
+	// (docs/adr/0029). For /runtime jobs the token stays off the CR (docs/adr/0028).
+	if l.llmRankActors && string(spec.Type) == llmRankJobType && l.aiToken != "" {
+		env[agent.EnvAIToken] = l.aiToken
+	}
 
 	u := &unstructured.Unstructured{}
 	u.SetAPIVersion(rayAPIVersion)

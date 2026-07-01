@@ -9,5 +9,8 @@ dist/
 .idea/
 .DS_Store
 deploy/
+# ...except the Ray-actors entrypoint, which Dockerfile.ray bakes into the image
+# (docs/adr/0029).
+!deploy/ray/llm_rank_ray.py
 Dockerfile
 .dockerignore
