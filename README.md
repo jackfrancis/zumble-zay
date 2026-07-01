@@ -94,7 +94,9 @@ curl localhost:8080/auth/providers   # enabled OAuth providers
 
 `make dev-up` is idempotent — it auto-detects podman/docker, sets the kind
 podman provider when needed, and creates a random `SESSION_SECRET` only if the
-Secret does not already exist (so re-runs never rotate your session secret).
+Secret does not already exist (so re-runs never rotate your session secret). It
+also seeds `AI_TOKEN` from your environment when exported, so the in-cluster LLM
+gateway comes up — see [Enable model ranking](#enable-model-ranking-optional).
 
 ### Iterate
 
@@ -121,6 +123,29 @@ kubectl -n zumble-zay rollout restart deploy/zumble-zay
 
 Set each provider's OAuth redirect URI to `${BASE_URL}/auth/<provider>/callback`
 (for the dev overlay, `http://localhost:8080/auth/github/callback`).
+
+### Enable model ranking (optional)
+
+The dev overlay runs an in-cluster [agentgateway](deploy/k8s/overlays/dev/agentgateway.yaml)
+as the agents' LLM egress proxy: every runtime's chat-completions call goes
+through it, and the provider key lives only in the gateway (sourced from
+`zumble-zay-secrets/AI_TOKEN`). Provide that key to enable LLM ranking:
+
+```sh
+export AI_TOKEN=<provider key>   # e.g. a GitHub Copilot token
+make dev-up                      # seeds AI_TOKEN into the Secret, then rolls out
+```
+
+Without `AI_TOKEN` the gateway pod stays in `CreateContainerConfigError` and
+runtimes fall back to the deterministic stub ranker — health, auth, and worklist
+rendering still work. To add the key to an already-running cluster without a full
+`make dev-up`:
+
+```sh
+kubectl -n zumble-zay patch secret zumble-zay-secrets --type merge \
+  -p "{\"stringData\":{\"AI_TOKEN\":\"$AI_TOKEN\"}}"
+kubectl -n zumble-zay rollout restart deploy/zumble-zay-agentgateway
+```
 
 ### Tear down
 
