@@ -61,7 +61,7 @@ func (t *githubToolBox) Definitions() []worklist.ToolDef {
 	return []worklist.ToolDef{
 		{
 			Name:        "github_read_file",
-			Description: "Read a file's contents from a GitHub repository at a given ref (branch, tag, or commit SHA). Use to check current dependency versions, config, or code on a branch such as master/main — e.g. whether go.mod already bumped a dependency. Returns up to a 32 KB window; if the file is larger, the result reports the file size and a follow-up offset — call again with that offset to read further.",
+			Description: "Read a file's contents from a GitHub repository at a given ref (branch, tag, or commit SHA). Use to check current dependency versions, config, or code on a branch such as master/main — e.g. whether go.mod already bumped a dependency. Returns up to a 32 KB window; if the file is larger, the result reports the file size and a follow-up offset — call again with that offset to read further. Generated and vendored files (zz_generated.*, *.pb.go, anything under vendor/ or testdata/, and lockfiles) are large and low-signal for triage — read them only if the user specifically asks.",
 			Parameters:  schemaReadFile,
 		},
 		{

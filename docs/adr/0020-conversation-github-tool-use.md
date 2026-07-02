@@ -50,7 +50,10 @@ Give the conversation a small set of **read-only GitHub tools** and run a bounde
 - **Bounds:** tool results are size-capped before they re-enter the prompt; file
   reads cap decoded text and skip binaries; search caps results. A failed call
   (e.g. a repo the token can't see → 404) is returned to the model as a tool
-  error, not a job failure.
+  error, not a job failure. The system prompt and the read-file tool description
+  also steer the model to read economically — skip generated/vendored/lockfiles and
+  page a large file only when needed — so a review does not bloat the transcript by
+  reading mechanical content (docs/adr/0015).
 
 It remains **read-only**: every tool only ever GETs, scoped to the user's own
 token, and the assistant still only drafts text the user posts. Reach is "any
