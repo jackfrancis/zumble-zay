@@ -77,6 +77,15 @@ repository documents the **official KubeRay** Prometheus/Grafana install
 (kube-prometheus-stack + KubeRay `PodMonitor`s + Ray's Grafana dashboards) in
 `deploy/ray/monitoring/README.md`, rather than a hand-rolled Prometheus.
 
+The program also emits **application metrics** via `ray.util.metrics` —
+`ray_zz_items_scored` (counter), `ray_zz_score_errors` (counter, tagged by
+failure kind), and `ray_zz_score_latency_seconds` (histogram) — exported on the
+same endpoint the PodMonitors scrape. Because the actors are short-lived, an
+optional `RAY_LLM_RANK_METRICS_LINGER_S` holds the job briefly after scoring so
+these land in Prometheus (a Pushgateway is the production answer). Verified live:
+`sum(ray_zz_items_scored)` and a p95 of `ray_zz_score_latency_seconds` query
+correctly in the official Prometheus.
+
 ## Validation
 Verified end-to-end on a local kind + KubeRay cluster: an `llm-rank` RayJob ran
 `python /llm_rank_ray.py`, spawned four `Scorer` actors across the head and

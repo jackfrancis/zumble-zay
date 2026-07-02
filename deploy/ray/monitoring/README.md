@@ -75,3 +75,34 @@ curl -s localhost:9090/api/v1/targets \
   as `ray::Scorer.score` components in `ray_component_*` metrics.
 - Teardown: `helm -n prometheus-system uninstall prometheus` and
   `kubectl delete ns prometheus-system`.
+
+## Custom application metrics (actors llm-rank)
+
+Beyond Ray's built-in system metrics, the actors path emits its own
+**application metrics** via `ray.util.metrics` (in `deploy/ray/llm_rank_ray.py`).
+Ray exports them on the same `:8080/metrics` endpoint the PodMonitors scrape, so
+they need no extra config — Ray prefixes them with `ray_`:
+
+| Metric | Type | Tags | Meaning |
+|--------|------|------|---------|
+| `ray_zz_items_scored` | counter | `model` | Items successfully scored |
+| `ray_zz_score_errors` | counter | `model`, `kind` | Failures by kind (`http_401`, `parse_or_network`, `no_token`) |
+| `ray_zz_score_latency_seconds` | histogram | `model` | Per-item Copilot call latency |
+
+Example PromQL:
+
+```promql
+sum(ray_zz_items_scored)                                     # total scored
+sum by (kind) (ray_zz_score_errors)                          # failure breakdown
+histogram_quantile(0.95,
+  sum(rate(ray_zz_score_latency_seconds_bucket[5m])) by (le)) # p95 latency
+```
+
+**Batch-job caveat.** These actors are short-lived, so their metrics can be gone
+before Ray's metric agent exports them and Prometheus (15s interval) scrapes
+them. The job therefore supports an optional linger — set
+`RAY_LLM_RANK_METRICS_LINGER_S` on the orchestrator (e.g. `45`) so it holds after
+scoring long enough for the metrics to land. Default `0` (no linger) for
+production, where a proper batch-metrics sink (e.g. Prometheus Pushgateway) is
+the real answer.
+

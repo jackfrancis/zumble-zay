@@ -92,6 +92,10 @@ RAY_CLUSTER_NAME ?= zz-ray
 # a Python @ray.remote actors program instead of /runtime; empty leaves it on
 # /runtime (the ADR 0028 default).
 RAY_LLM_RANK_ACTORS ?=
+# Optional seconds the actors llm-rank job lingers after scoring so its Ray
+# application metrics get exported and scraped from a short batch job
+# (docs/adr/0029). Empty/0 = no linger.
+RAY_LLM_RANK_METRICS_LINGER_S ?=
 # When LAUNCHER=ray, dev-up additionally builds+loads the Ray image; empty
 # otherwise, so a default dev-up is unchanged.
 DEV_UP_RAY_PREREQ = $(if $(filter ray,$(LAUNCHER)),kind-load-ray,)
@@ -423,7 +427,8 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime $(DEV_UP_R
 	@if [ "$(LAUNCHER)" = "ray" ]; then \
 		kubectl -n $(KUBE_NS) set env deploy/zumble-zay-orchestrator \
 			RAY_CLUSTER=$(RAY_CLUSTER_NAME) RAY_NAMESPACE=$(KUBE_NS) \
-			RAY_LLM_RANK_ACTORS=$(RAY_LLM_RANK_ACTORS); \
+			RAY_LLM_RANK_ACTORS=$(RAY_LLM_RANK_ACTORS) \
+			RAY_LLM_RANK_METRICS_LINGER_S=$(RAY_LLM_RANK_METRICS_LINGER_S); \
 	fi
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is

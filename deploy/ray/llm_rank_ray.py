@@ -26,9 +26,12 @@ Run (as a RayJob entrypoint): `python /llm_rank_ray.py`
 import json
 import os
 import sys
+import time
+import urllib.error
 import urllib.request
 
 import ray
+from ray.util.metrics import Counter, Histogram
 
 # --- config from the ZZ_* injection contract (docs/adr/0012) ---
 ZZ_BASE_URL = os.environ["ZZ_BASE_URL"].rstrip("/")
@@ -106,6 +109,28 @@ class Scorer:
         self.model = model
         self.integration_id = integration_id
         self.token = os.environ.get("ZZ_AI_TOKEN", "")
+        # Application metrics (docs/adr/0029): exported through the same Ray
+        # metrics endpoint the KubeRay PodMonitors already scrape, so they land in
+        # Prometheus as zz_items_scored_total / zz_score_errors_total /
+        # zz_score_latency_seconds with no extra scrape config. Defined per actor;
+        # Prometheus aggregates by name+tags across the pool. The "model" tag lets
+        # a dashboard break results down per ranking model.
+        self._m_scored = Counter(
+            "zz_items_scored",
+            description="Work items successfully scored by the actors llm-rank path.",
+            tag_keys=("model",),
+        )
+        self._m_errors = Counter(
+            "zz_score_errors",
+            description="Per-item scoring failures, tagged by kind.",
+            tag_keys=("model", "kind"),
+        )
+        self._m_latency = Histogram(
+            "zz_score_latency_seconds",
+            description="Per-item Copilot scoring call latency (seconds).",
+            boundaries=[0.25, 0.5, 1, 2, 4, 8, 16, 32, 60],
+            tag_keys=("model",),
+        )
 
     def score(self, item):
         """Return (item_id, proposal_dict) or (item_id, None) on any failure.
@@ -114,9 +139,11 @@ class Scorer:
         the item unchanged rather than failing the whole job.
         """
         item_id = item.get("id")
+        tags = {"model": self.model}
         if not self.token:
             print(f"scorer: item {item_id} skipped: no ZZ_AI_TOKEN on this node",
                   file=sys.stderr)
+            self._m_errors.inc(1, tags={**tags, "kind": "no_token"})
             return item_id, None
         body = json.dumps(
             {
@@ -135,6 +162,7 @@ class Scorer:
         req.add_header("Accept", "application/json")
         req.add_header("Authorization", "Bearer " + self.token)
         req.add_header("Copilot-Integration-Id", self.integration_id)
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read())
@@ -143,9 +171,17 @@ class Scorer:
                 content = content.strip("`")
                 content = content[content.find("{"):content.rfind("}") + 1]
             doc = json.loads(content)
+        except urllib.error.HTTPError as exc:
+            print(f"scorer: item {item_id} failed: HTTP {exc.code}", file=sys.stderr)
+            self._m_errors.inc(1, tags={**tags, "kind": f"http_{exc.code}"})
+            return item_id, None
         except Exception as exc:  # noqa: BLE001 - best-effort per item
             print(f"scorer: item {item_id} failed: {exc}", file=sys.stderr)
+            self._m_errors.inc(1, tags={**tags, "kind": "parse_or_network"})
             return item_id, None
+        # Record latency and a successful score only on the happy path.
+        self._m_latency.observe(time.monotonic() - started, tags=tags)
+        self._m_scored.inc(1, tags=tags)
         return item_id, {
             "relevance": _clamp01(doc.get("relevance")),
             "impact": _clamp01(doc.get("impact")),
@@ -210,6 +246,19 @@ def main():
         _zz_post("/agent/worklist", {"items": changed})
     print(f"llm_rank_ray: scored {len(changed)}/{len(items)} items via "
           f"{n} Ray actors.")
+
+    # Application metrics from short-lived actors are only useful if the node's
+    # metrics agent gets to export them and Prometheus gets to scrape them before
+    # the job tears down. Optionally linger (keeping the actor handles alive) for
+    # a couple of scrape intervals so zz_items_scored/zz_score_errors/
+    # zz_score_latency_seconds land in Prometheus (docs/adr/0029). Default 0 (no
+    # linger) for production; set RAY_LLM_RANK_METRICS_LINGER_S to enable.
+    linger = int(os.environ.get("RAY_LLM_RANK_METRICS_LINGER_S", "0"))
+    if linger > 0:
+        print(f"llm_rank_ray: lingering {linger}s so metrics are scrapeable...")
+        time.sleep(linger)
+    # Reference scorers after the linger so they are not GC'd early.
+    del scorers
 
 
 if __name__ == "__main__":

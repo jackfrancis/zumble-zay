@@ -122,15 +122,16 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 			"llm_rank_actors", llmRankActors, "zz_base_url", opts.ZZBaseURL)
 	}
 	return &Launcher{
-		client:        dyn,
-		namespace:     namespace,
-		cluster:       cluster,
-		entrypoint:    entrypoint,
-		llmRankActors: llmRankActors,
-		aiToken:       aiToken,
-		ttlSeconds:    ttl,
-		opts:          opts,
-		poll:          3 * time.Second,
+		client:         dyn,
+		namespace:      namespace,
+		cluster:        cluster,
+		entrypoint:     entrypoint,
+		llmRankActors:  llmRankActors,
+		aiToken:        aiToken,
+		metricsLingerS: strings.TrimSpace(os.Getenv("RAY_LLM_RANK_METRICS_LINGER_S")),
+		ttlSeconds:     ttl,
+		opts:           opts,
+		poll:           3 * time.Second,
 	}, nil
 }
 
@@ -138,15 +139,16 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 // (docs/adr/0028). Only the thin CR envelope is unstructured; the ZZ_* injection
 // contract is the same map every substrate uses, rendered into runtimeEnvYAML.
 type Launcher struct {
-	client        dynamic.Interface
-	namespace     string
-	cluster       string
-	entrypoint    string
-	llmRankActors bool
-	aiToken       string
-	ttlSeconds    int64
-	opts          runtimespec.Options
-	poll          time.Duration
+	client         dynamic.Interface
+	namespace      string
+	cluster        string
+	entrypoint     string
+	llmRankActors  bool
+	aiToken        string
+	metricsLingerS string
+	ttlSeconds     int64
+	opts           runtimespec.Options
+	poll           time.Duration
 }
 
 var (
@@ -222,6 +224,12 @@ func (l *Launcher) rayJob(spec orchestrator.JobSpec, token string) *unstructured
 	// (docs/adr/0029). For /runtime jobs the token stays off the CR (docs/adr/0028).
 	if l.llmRankActors && string(spec.Type) == llmRankJobType && l.aiToken != "" {
 		env[agent.EnvAIToken] = l.aiToken
+	}
+	// Pass the optional metrics linger through to the actors program so its
+	// application metrics survive to be scraped from a short batch job
+	// (docs/adr/0029). Empty/unset means no linger.
+	if l.llmRankActors && string(spec.Type) == llmRankJobType && l.metricsLingerS != "" {
+		env["RAY_LLM_RANK_METRICS_LINGER_S"] = l.metricsLingerS
 	}
 
 	u := &unstructured.Unstructured{}
