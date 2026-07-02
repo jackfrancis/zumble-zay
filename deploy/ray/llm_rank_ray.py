@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Ray-actors execution of the llm-rank job (docs/adr/0031).
 
-This is the intra-job-parallel alternative to the Go /runtime binary. Where the
-default ray substrate runs /runtime (a single Go process) as the RayJob
-entrypoint, this program runs ON the Ray cluster and fans the per-item Copilot
-scoring out across a pool of Ray *actors* — genuine @ray.remote workers spread
-across the RayCluster's head and worker nodes — then gathers the results and
-writes the proposals back to ZZ.
+This is how the ray substrate runs llm-rank. Where every *other* job type runs
+/runtime (a single Go process) as the RayJob entrypoint, an llm-rank job runs
+THIS program ON the Ray cluster and fans the per-item Copilot scoring out across
+a pool of Ray *actors* — genuine @ray.remote workers spread across the
+RayCluster's head and worker nodes — then gathers the results and writes the
+proposals back to ZZ.
 
 It speaks the exact same ZZ agent HTTP contract as internal/agent (the Go
 runtime), so ZZ core is unchanged:

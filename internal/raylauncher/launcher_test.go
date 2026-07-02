@@ -34,53 +34,52 @@ func testLauncher() *Launcher {
 	}
 }
 
-// TestEntrypointActorModeForLLMRank verifies that actor mode swaps the entrypoint
-// to the Ray-actors program for llm-rank jobs only, leaving other job types on
-// /runtime and leaving the default (non-actor) launcher entirely on /runtime
-// (docs/adr/0031).
-func TestEntrypointActorModeForLLMRank(t *testing.T) {
-	base := testLauncher()
+// TestEntrypointForLLMRank verifies that llm-rank runs the Ray-actors program
+// while every other job type runs /runtime, and that the CR carries the model
+// token for the actors end-to-end (docs/adr/0031).
+func TestEntrypointForLLMRank(t *testing.T) {
+	l := testLauncher()
 
-	// Default launcher: every job type uses /runtime.
-	if got := base.entrypointFor(orchestrator.JobSpec{Type: "llm-rank"}); got != defaultEntrypoint {
-		t.Errorf("non-actor llm-rank entrypoint = %q, want %q", got, defaultEntrypoint)
+	// llm-rank uses the Python actors program.
+	if got := l.entrypointFor(orchestrator.JobSpec{Type: "llm-rank"}); got != actorsEntrypoint {
+		t.Errorf("llm-rank entrypoint = %q, want %q", got, actorsEntrypoint)
 	}
-
-	// Actor mode: llm-rank uses the Python actors program; others stay on /runtime.
-	actor := testLauncher()
-	actor.llmRankActors = true
-	if got := actor.entrypointFor(orchestrator.JobSpec{Type: "llm-rank"}); got != actorsEntrypoint {
-		t.Errorf("actor-mode llm-rank entrypoint = %q, want %q", got, actorsEntrypoint)
-	}
+	// Every other job type stays on /runtime.
 	for _, jt := range []string{"github-ingest", "github-enrich", "github-converse"} {
-		if got := actor.entrypointFor(orchestrator.JobSpec{Type: orchestrator.JobType(jt)}); got != defaultEntrypoint {
-			t.Errorf("actor-mode %s entrypoint = %q, want %q (only llm-rank switches)", jt, got, defaultEntrypoint)
+		if got := l.entrypointFor(orchestrator.JobSpec{Type: orchestrator.JobType(jt)}); got != defaultEntrypoint {
+			t.Errorf("%s entrypoint = %q, want %q (only llm-rank switches)", jt, got, defaultEntrypoint)
 		}
 	}
 
-	// And the CR reflects it end-to-end.
-	u := actor.rayJob(orchestrator.JobSpec{Type: "llm-rank", ActingUserID: "u1"}, "tok")
+	// And the CR reflects it end-to-end, injecting the model token the actors need.
+	l.aiToken = "ai-tok"
+	u := l.rayJob(orchestrator.JobSpec{Type: "llm-rank", ActingUserID: "u1"}, "tok")
 	ep, _, _ := unstructured.NestedString(u.Object, "spec", "entrypoint")
 	if ep != actorsEntrypoint {
-		t.Errorf("actor-mode rayJob entrypoint = %q, want %q", ep, actorsEntrypoint)
+		t.Errorf("llm-rank rayJob entrypoint = %q, want %q", ep, actorsEntrypoint)
+	}
+	envYAML, _, _ := unstructured.NestedString(u.Object, "spec", "runtimeEnvYAML")
+	if !strings.Contains(envYAML, "ZZ_AI_TOKEN") || !strings.Contains(envYAML, "ai-tok") {
+		t.Errorf("llm-rank runtimeEnvYAML must carry ZZ_AI_TOKEN for the actors; got: %s", envYAML)
 	}
 }
 
 // TestRayJobEmbedsRuntimeContract is the cross-substrate regression check: the
 // RayJob carries the identical ZZ_* injection contract as the Job, Pod, and
 // Sandbox launchers — here inside spec.runtimeEnvYAML rather than a pod, since a
-// RayJob hosts no pod (docs/adr/0012, 0028).
+// RayJob hosts no pod (docs/adr/0012, 0028). Uses a /runtime job type (llm-rank
+// runs the actors program instead — see TestEntrypointForLLMRank).
 func TestRayJobEmbedsRuntimeContract(t *testing.T) {
 	l := testLauncher()
 	u := l.rayJob(orchestrator.JobSpec{
-		JobID: "j1", Type: "llm-rank", Provider: "github", ActingUserID: "github:1494193",
+		JobID: "j1", Type: "github-enrich", Provider: "github", ActingUserID: "github:1494193",
 	}, "tok-123")
 
 	if u.GetAPIVersion() != rayAPIVersion || u.GetKind() != rayKind {
 		t.Fatalf("gvk = %s/%s, want %s/%s", u.GetAPIVersion(), u.GetKind(), rayAPIVersion, rayKind)
 	}
-	if gn := u.GetGenerateName(); gn != "zz-llm-rank-" {
-		t.Errorf("generateName = %q, want zz-llm-rank-", gn)
+	if gn := u.GetGenerateName(); gn != "zz-github-enrich-" {
+		t.Errorf("generateName = %q, want zz-github-enrich-", gn)
 	}
 	if got := u.GetLabels()["zumble-zay.dev/acting-user"]; got != "github-1494193" {
 		t.Errorf("acting-user label = %q, want github-1494193 (sanitized)", got)
@@ -101,7 +100,7 @@ func TestRayJobEmbedsRuntimeContract(t *testing.T) {
 
 	envYAML, _, _ := unstructured.NestedString(u.Object, "spec", "runtimeEnvYAML")
 	for _, want := range []string{
-		"ZZ_JOB_TYPE", "llm-rank",
+		"ZZ_JOB_TYPE", "github-enrich",
 		"ZZ_BASE_URL", "http://zz:8080",
 		"ZZ_JOB_TOKEN", "tok-123",
 		"ZZ_AI_ENDPOINT", "ZZ_AI_MODEL", "claude-opus-4.8",

@@ -18,15 +18,15 @@ process; on a Ray cluster the same fan-out can instead be distributed across the
 cluster's nodes using **Ray actors**.
 
 ## Decision
-Add an **opt-in, llm-rank-only** execution path that runs a Python Ray program
+On the `ray` substrate, run the `llm-rank` job as a Python Ray program
 (`deploy/ray/llm_rank_ray.py`) as the RayJob entrypoint instead of `/runtime`,
 using genuine `@ray.remote` **actors** to parallelize per-item scoring across the
 RayCluster.
 
-- **Opt-in toggle.** `RAY_LLM_RANK_ACTORS=true` on the orchestrator turns it on.
-  It is scoped to `JobType == llm-rank`; every other job type — and all jobs when
-  the flag is off — still runs `/runtime` (the ADR 0028 behavior is the default
-  and is unchanged).
+- **Default for llm-rank, scoped to llm-rank.** On the ray substrate an `llm-rank`
+  job always runs the actors program; every other job type still runs `/runtime`
+  (the ADR 0028 behavior, unchanged). There is no toggle — the actors program *is*
+  the ray substrate's llm-rank behavior.
 - **Same seam, same CR.** The launcher only swaps `spec.entrypoint`
   (`entrypointFor`); the RayJob envelope, `clusterSelector`, TTL, and the `ZZ_*`
   `runtimeEnvYAML` injection contract are identical to ADR 0028. No new field, no
@@ -35,8 +35,12 @@ RayCluster.
   the Go runtime uses (`GET`/`POST /agent/worklist`), setting each item's
   `signals.proposed`. ZZ core is untouched and still ratifies the proposal
   against its deterministic baseline (docs/adr/0011).
-- **Same token discipline.** The model token is read from `ZZ_AI_TOKEN` carried
-  by the **cluster** pods, never placed in the per-job CR (docs/adr/0028).
+- **Token to the actors.** Ray's `runtime_env` does not reliably propagate the
+  cluster pod's `ZZ_AI_TOKEN` into actor processes, so when a direct model token is
+  configured the launcher injects it into the `llm-rank` RayJob's `runtimeEnvYAML`
+  — the one channel Ray guarantees reaches actors. On the dev overlay the model
+  call goes through the agentgateway (which holds the credential), so no token is
+  placed on the CR at all (see Validation).
 - **Same image.** `deploy/ray/Dockerfile.ray` bakes `/llm_rank_ray.py` alongside
   `/runtime`, so one Ray image serves both paths (the Ray base already has
   Python + Ray).
@@ -58,12 +62,19 @@ RayCluster.
   the reference for extending the same treatment to other fan-out jobs
   (e.g. github-enrich) later.
 - Two runtimes now implement llm-rank (Go `/runtime` and the Python actors
-  program). They share the ZZ wire contract and the ranking prompt intent, but
-  the prompt/logic is duplicated across languages — a deliberate, contained cost
-  paid only on the opt-in path. The Go path remains the tested default.
-- For the small local kind RayCluster the parallelism win is modest (few items,
-  few nodes); the value is architectural — it demonstrates and enables true
-  intra-job Ray parallelism, and scales with worker count on a real cluster.
+  program). They share the ZZ wire contract and the ranking prompt intent, but the
+  prompt/logic is duplicated across languages — a deliberate, contained cost of the
+  ray substrate's llm-rank path. The Go `/runtime` remains the implementation every
+  other substrate uses, and the tested default off the ray substrate.
+- **This is a demonstration, not a throughput win for this workload.** Each item is
+  one slow, I/O-bound model call, and the Go `runRank` already fans those out with
+  bounded goroutine concurrency inside a single process — for an I/O-bound,
+  single-endpoint workload that already saturates. Ray actors match that
+  concurrency with more machinery (a Python reimplementation, cross-node
+  scheduling); the model API is the ceiling either way. Actors only pull ahead when
+  the per-item work is CPU/GPU-bound or must scale past one node. The value here is
+  architectural — it demonstrates and enables true intra-job Ray parallelism on the
+  substrate, and is the reference for jobs where that actually pays off.
 - Non-goals unchanged: no Ray Serve, no long-lived actors across jobs — the
   actors live only for the duration of one llm-rank job, then the RayJob
   self-reaps (`shutdownAfterJobFinishes`).

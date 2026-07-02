@@ -35,4 +35,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0028](0028-ray-kuberay-substrate.md) | Ray/KubeRay as an optional, build-tagged substrate (RayJob on a standing cluster, env contract via runtimeEnvYAML) | Proposed |
 | [0029](0029-kagent-durable-runtime-substrate.md) | kagent as a durable BYO-A2A runtime substrate (per-job params in message metadata, detached callback completion) | Accepted |
 | [0030](0030-job-token-pull-path.md) | Job-token pull-path: single-use ticket redemption keeps the live token out of a durable runtime's persisted task history | Accepted |
-| [0031](0031-ray-actors-llm-rank.md) | Ray-actors execution path for llm-rank (opt-in intra-job parallelism via @ray.remote actors) | Proposed |
+| [0031](0031-ray-actors-llm-rank.md) | Ray-actors execution path for llm-rank (intra-job parallelism via @ray.remote actors) | Proposed |

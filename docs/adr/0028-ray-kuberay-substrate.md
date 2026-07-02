@@ -49,7 +49,10 @@ It maps a job onto a **`RayJob` (ray.io/v1) targeting a standing RayCluster via
   Instead the standing RayCluster's pods carry `ZZ_AI_TOKEN` from a Secret (set
   once, out of band). This is the one intentional deviation from the other
   substrates' injection contract, and it is a security property, not an
-  oversight: a per-job CR never embeds the model secret in clear text.
+  oversight: a per-job CR never embeds the model secret in clear text. (The
+  llm-rank actors path is the single exception: Ray does not reliably propagate a
+  cluster-pod env var into actor processes, so it injects the token into that
+  job's `runtimeEnvYAML` — see docs/adr/0031.)
 - **Unstructured + dynamic client.** The CR is built `unstructured` and submitted
   with `client-go`'s dynamic client, so the substrate adds **no** new module
   dependency (the typed `kuberay/ray-operator` types and their transitive graph
@@ -74,8 +77,11 @@ It maps a job onto a **`RayJob` (ray.io/v1) targeting a standing RayCluster via
   exists where the entrypoint runs. (A future option is a Ray-native wrapper that
   shells to `/runtime` as a task; deferred — it buys nothing for a batch binary.)
 - Honest scope: this uses Ray for cluster lifecycle, scheduling, and autoscaling
-  of an otherwise-batch workload; it does not (yet) parallelize a single job with
-  Ray tasks/actors. That remains open if a job ever needs intra-job fan-out.
+  of an otherwise-batch workload; the substrate itself does not parallelize a
+  single job with Ray tasks/actors. That intra-job fan-out is added for the
+  `llm-rank` job by docs/adr/0031 (a Ray-actors entrypoint), which supersedes the
+  "(yet)" framing here; every other job type still runs the single-process
+  `/runtime` binary.
 - The substrate is build-tag-gated, so it is merge-clean with the default binary
   and with the other substrates: adding it touches only its own package and a
   tagged blank import.

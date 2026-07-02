@@ -26,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o
 # ---- ray base (arm64-native) + runtime binary ----
 FROM rayproject/ray:2.9.0-aarch64
 COPY --from=build /out/runtime /runtime
-# The Ray-actors llm-rank entrypoint (docs/adr/0031), used when the launcher runs
-# in actor mode (RAY_LLM_RANK_ACTORS=true). Baked alongside /runtime so the same
-# image serves both the Go batch path and the Python actors path.
+# The Ray-actors llm-rank entrypoint (docs/adr/0031): the ray substrate runs this
+# for llm-rank jobs. Baked alongside /runtime so the same image serves both the Go
+# batch path (every other job type) and the Python actors path (llm-rank).
 COPY deploy/ray/llm_rank_ray.py /llm_rank_ray.py
