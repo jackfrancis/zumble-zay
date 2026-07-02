@@ -40,7 +40,7 @@ const (
 	// RayCluster image must provide it (docs/adr/0028).
 	defaultEntrypoint = "/runtime"
 	// actorsEntrypoint runs the Ray-actors llm-rank program instead of /runtime;
-	// it is the entrypoint for every llm-rank job (docs/adr/0031). The RayCluster
+	// it is the entrypoint for every llm-rank job (docs/adr/0028). The RayCluster
 	// image must provide it (baked by deploy/ray/Dockerfile.ray).
 	actorsEntrypoint = "python /llm_rank_ray.py"
 	// llmRankJobType is the JobType whose scoring the actor path parallelizes
@@ -101,7 +101,7 @@ func build(cfg *config.Config, log *slog.Logger) (orchestrator.Launcher, error) 
 		// ranking-model token is carried by the standing RayCluster's pods, never
 		// placed in the plaintext runtimeEnvYAML of a per-job CR (docs/adr/0028).
 	}
-	// llm-rank runs as a Ray-actors program (docs/adr/0031), and Ray's runtime_env
+	// llm-rank runs as a Ray-actors program (docs/adr/0028), and Ray's runtime_env
 	// does not reliably propagate the cluster pod's ZZ_AI_TOKEN into actor
 	// processes. So the launcher injects the token — which the orchestrator already
 	// holds in its own env — into the RayJob runtime_env for llm-rank, the only
@@ -210,13 +210,13 @@ func (l *Launcher) rayJob(spec orchestrator.JobSpec, token string) *unstructured
 	})
 	// llm-rank only: deliver the model token to the actors via the RayJob
 	// runtime_env, the one channel Ray guarantees reaches actor processes
-	// (docs/adr/0031). For /runtime jobs the token stays off the CR (docs/adr/0028).
+	// (docs/adr/0028). For /runtime jobs the token stays off the CR (docs/adr/0028).
 	if string(spec.Type) == llmRankJobType && l.aiToken != "" {
 		env[agent.EnvAIToken] = l.aiToken
 	}
 	// Pass the optional metrics linger through to the actors program so its
 	// application metrics survive to be scraped from a short batch job
-	// (docs/adr/0031). Empty/unset means no linger.
+	// (docs/adr/0028). Empty/unset means no linger.
 	if string(spec.Type) == llmRankJobType && l.metricsLingerS != "" {
 		env["RAY_LLM_RANK_METRICS_LINGER_S"] = l.metricsLingerS
 	}
@@ -238,7 +238,7 @@ func (l *Launcher) rayJob(spec orchestrator.JobSpec, token string) *unstructured
 
 // entrypointFor selects the RayJob entrypoint for a job. An llm-rank job runs the
 // Ray-actors Python program that parallelizes scoring across the cluster
-// (docs/adr/0031); every other job type runs the configured /runtime batch binary
+// (docs/adr/0028); every other job type runs the configured /runtime batch binary
 // (docs/adr/0028).
 func (l *Launcher) entrypointFor(spec orchestrator.JobSpec) string {
 	if string(spec.Type) == llmRankJobType {

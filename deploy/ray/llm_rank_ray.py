@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ray-actors execution of the llm-rank job (docs/adr/0031).
+"""Ray-actors execution of the llm-rank job (docs/adr/0028).
 
 This is how the ray substrate runs llm-rank. Where every *other* job type runs
 /runtime (a single Go process) as the RayJob entrypoint, an llm-rank job runs
@@ -109,7 +109,7 @@ class Scorer:
         self.model = model
         self.integration_id = integration_id
         self.token = os.environ.get("ZZ_AI_TOKEN", "")
-        # Application metrics (docs/adr/0031): exported through the same Ray
+        # Application metrics (docs/adr/0028): exported through the same Ray
         # metrics endpoint the KubeRay PodMonitors already scrape, so they land in
         # Prometheus as zz_items_scored_total / zz_score_errors_total /
         # zz_score_latency_seconds with no extra scrape config. Defined per actor;
@@ -212,7 +212,7 @@ def _zz_post(path, payload):
 def main():
     # Join the standing RayCluster this entrypoint runs on. The model token is NOT
     # required by the driver — each Scorer actor reads ZZ_AI_TOKEN from its own
-    # node env (docs/adr/0031) — so the driver only needs the ZZ contract.
+    # node env (docs/adr/0028) — so the driver only needs the ZZ contract.
     ray.init(address="auto")
 
     items = _zz_get("/agent/worklist").get("items", [])
@@ -251,7 +251,7 @@ def main():
     # metrics agent gets to export them and Prometheus gets to scrape them before
     # the job tears down. Optionally linger (keeping the actor handles alive) for
     # a couple of scrape intervals so zz_items_scored/zz_score_errors/
-    # zz_score_latency_seconds land in Prometheus (docs/adr/0031). Default 0 (no
+    # zz_score_latency_seconds land in Prometheus (docs/adr/0028). Default 0 (no
     # linger) for production; set RAY_LLM_RANK_METRICS_LINGER_S to enable.
     linger = int(os.environ.get("RAY_LLM_RANK_METRICS_LINGER_S", "0"))
     if linger > 0:

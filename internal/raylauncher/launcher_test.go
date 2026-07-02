@@ -36,7 +36,7 @@ func testLauncher() *Launcher {
 
 // TestEntrypointForLLMRank verifies that llm-rank runs the Ray-actors program
 // while every other job type runs /runtime, and that the CR carries the model
-// token for the actors end-to-end (docs/adr/0031).
+// token for the actors end-to-end (docs/adr/0028).
 func TestEntrypointForLLMRank(t *testing.T) {
 	l := testLauncher()
 
