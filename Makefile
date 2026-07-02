@@ -3,7 +3,8 @@
         build-runtime image-runtime image-runtime-save kind-load-runtime \
         build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer \
         image-runtime-shell image-runtime-shell-save kind-load-runtime-shell opensandbox-install \
-        image-runtime-a2a image-runtime-a2a-save kind-load-runtime-a2a kagent-install
+        image-runtime-a2a image-runtime-a2a-save kind-load-runtime-a2a kagent-install \
+        image-ray image-ray-save kind-load-ray
 
 BIN := bin/server
 
@@ -41,6 +42,7 @@ LAUNCHER ?= k8s-job
 # LAUNCHER value (agent-sandbox).
 ORCHESTRATOR_GO_TAGS = $(strip $(ORCHESTRATOR_GO_TAGS_LIST))
 ORCHESTRATOR_GO_TAGS_LIST += $(if $(filter agent-sandbox,$(LAUNCHER)),agent_sandbox,)
+ORCHESTRATOR_GO_TAGS_LIST += $(if $(filter ray,$(LAUNCHER)),ray,)
 # Pinned agent-sandbox release for the optional controller + CRDs install.
 AGENT_SANDBOX_VERSION ?= v0.5.0
 
@@ -78,6 +80,21 @@ RUNTIME_A2A_IMAGE ?= localhost/zumble-zay-runtime-a2a:dev
 # (ZZ_AI_ENDPOINT), not kagent's own ModelConfig.
 KAGENT_VERSION ?= 0.9.11
 KAGENT_NAMESPACE ?= kagent
+
+# Optional ray/kuberay substrate (LAUNCHER=ray, docs/adr/0028). When selected,
+# `make dev-up` installs the KubeRay operator at this version, builds+loads the
+# Ray image (which bundles /runtime), and applies a standing RayCluster. The
+# image/cluster names must match deploy/ray/raycluster.yaml and RAY_CLUSTER.
+KUBERAY_VERSION  ?= 1.1.1
+RAY_IMAGE        ?= localhost/zz-ray:dev
+RAY_CLUSTER_NAME ?= zz-ray
+# Optional seconds the actors llm-rank job lingers after scoring so its Ray
+# application metrics get exported and scraped from a short batch job
+# (docs/adr/0031). Empty/0 = no linger.
+RAY_LLM_RANK_METRICS_LINGER_S ?=
+# When LAUNCHER=ray, dev-up additionally builds+loads the Ray image; empty
+# otherwise, so a default dev-up is unchanged.
+DEV_UP_RAY_PREREQ = $(if $(filter ray,$(LAUNCHER)),kind-load-ray,)
 
 # Vendored GitHub Primer CSS (the UI's design system, served from the binary).
 # `make vendor-primer` refreshes these at the pinned versions; bump the versions
@@ -246,6 +263,23 @@ kagent-install:
 		--set providers.default=openAI --set providers.openAI.apiKey=sk-kagent-dev-unused \
 		--wait --timeout 360s
 
+# Build the Ray image that bundles the /runtime binary onto a Ray base
+# (docs/adr/0028). A RayJob runs entrypoint=/runtime on the cluster, so the
+# RayCluster image must carry the runtime binary. Engine-agnostic (podman/docker)
+# via the same plain-build + save + load-archive path as the other images.
+image-ray: engine
+	$(CONTAINER_ENGINE) build -f deploy/ray/Dockerfile.ray -t $(RAY_IMAGE) .
+
+# Export the Ray image to a portable archive.
+image-ray-save: image-ray
+	$(CONTAINER_ENGINE) save $(RAY_IMAGE) -o zumble-zay-ray-image.tar
+
+# Load the Ray image into kind so the RayCluster resolves it without a registry
+# pull (same engine-agnostic archive path as kind-load). Run before LAUNCHER=ray.
+kind-load-ray: image-ray-save
+	kind load image-archive zumble-zay-ray-image.tar --name $(KIND_CLUSTER)
+	rm -f zumble-zay-ray-image.tar
+
 # Export the orchestrator image to a portable archive (docs/adr/0023).
 image-orchestrator-save: image-orchestrator
 	$(CONTAINER_ENGINE) save $(ORCHESTRATOR_IMAGE) -o zumble-zay-orchestrator-image.tar
@@ -272,7 +306,7 @@ cluster-down:
 # LAUNCHER=agent-sandbox to build the orchestrator with the agent_sandbox tag,
 # install the agent-sandbox controller + CRDs, and deploy with it selected
 # (docs/adr/0026).
-dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
+dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime $(DEV_UP_RAY_PREREQ)
 	@kubectl create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl apply -f -
 	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets >/dev/null 2>&1 || \
 		kubectl -n $(KUBE_NS) create secret generic zumble-zay-secrets \
@@ -346,6 +380,22 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 		echo "loading A2A runtime image + installing the kagent control plane"; \
 		$(MAKE) kind-load-runtime-a2a kagent-install; \
 	fi
+	# Optional ray/kuberay substrate: install the KubeRay operator (+ CRDs) and a
+	# standing RayCluster so the orchestrator can create RayJobs (docs/adr/0028).
+	# Only when selected. helm upgrade --install keeps it idempotent; the readiness
+	# waits are best-effort so a slow rollout does not fail dev-up.
+	@if [ "$(LAUNCHER)" = "ray" ]; then \
+		command -v helm >/dev/null || { echo "helm not installed (https://helm.sh)"; exit 1; }; \
+		echo "installing KubeRay operator $(KUBERAY_VERSION)"; \
+		helm repo add kuberay https://ray-project.github.io/kuberay-helm/ >/dev/null 2>&1 || true; \
+		helm repo update kuberay >/dev/null 2>&1 || true; \
+		helm upgrade --install kuberay-operator kuberay/kuberay-operator \
+			--version $(KUBERAY_VERSION) -n kuberay-system --create-namespace; \
+		kubectl -n kuberay-system rollout status deploy/kuberay-operator --timeout=120s || true; \
+		echo "applying RayCluster $(RAY_CLUSTER_NAME)"; \
+		kubectl apply -f deploy/ray/raycluster.yaml; \
+		kubectl -n $(KUBE_NS) wait --for=condition=Ready pod -l ray.io/node-type=head --timeout=180s || true; \
+	fi
 	kubectl apply -k deploy/k8s/overlays/dev
 	# The kagent BYO Agent lives in the zumble-zay namespace (the kagent controller
 	# reconciles cluster-wide), so it is applied here — after the overlay creates
@@ -374,6 +424,14 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 			OPENSANDBOX_RUNTIME_IMAGE=$(RUNTIME_SHELL_IMAGE) \
 			RUNTIME_ZZ_BASE_URL=http://zumble-zay.$(KUBE_NS).svc.cluster.local:8080; \
 	fi
+	# The ray launcher needs the standing cluster's name/namespace (docs/adr/0028).
+	# llm-rank runs as the Ray-actors path (docs/adr/0031); RAY_LLM_RANK_METRICS_LINGER_S
+	# optionally holds the short batch job open so its metrics get scraped.
+	@if [ "$(LAUNCHER)" = "ray" ]; then \
+		kubectl -n $(KUBE_NS) set env deploy/zumble-zay-orchestrator \
+			RAY_CLUSTER=$(RAY_CLUSTER_NAME) RAY_NAMESPACE=$(KUBE_NS) \
+			RAY_LLM_RANK_METRICS_LINGER_S=$(RAY_LLM_RANK_METRICS_LINGER_S); \
+	fi
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is
 	# created, leaving the old code running. kind-load already replaced the image
@@ -394,6 +452,10 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	@echo
 	@echo "zumble-zay is running. Expose it with:  make dev-forward"
 	@echo "then:  curl localhost:8080/healthz"
+	@if [ "$(LAUNCHER)" = "ray" ]; then \
+		echo "ray substrate ready: RayCluster $(RAY_CLUSTER_NAME); jobs run as RayJobs (kubectl -n $(KUBE_NS) get rayjobs)"; \
+		echo "set the model token:  kubectl -n $(KUBE_NS) patch secret zumble-zay-secrets --type merge -p '{\"stringData\":{\"AI_TOKEN\":\"<copilot-token>\"}}'"; \
+	fi
 
 # Tear down the whole dev environment.
 dev-down: cluster-down

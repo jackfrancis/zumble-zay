@@ -1,0 +1,32 @@
+# Ray image that bundles the zumble-zay agent runtime (docs/adr/0028).
+#
+# A RayJob runs an entrypoint ON the RayCluster, so to execute zumble-zay jobs the
+# cluster image must contain the runtime binary at /runtime. Stock rayproject/ray
+# has python+ray but not /runtime; this image adds it.
+#
+# Build (from repo root):
+#   docker build -f deploy/ray/Dockerfile.ray -t localhost/zz-ray:dev .
+#   kind load docker-image localhost/zz-ray:dev --name zumble-zay
+#
+# The build stage compiles the same static runtime binary as Dockerfile.runtime,
+# then copies it onto the Ray base so the image is both a working Ray node and a
+# carrier of /runtime.
+
+# ---- build the runtime binary ----
+# arm64-native to match the -aarch64 Ray base below, so nothing runs under
+# emulation (rayproject/ray publishes an -aarch64 tag per version). On an amd64
+# host, use the amd64 base (drop the -aarch64 suffix) and GOARCH=amd64 instead.
+FROM golang:1.25 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /out/runtime ./cmd/runtime
+
+# ---- ray base (arm64-native) + runtime binary ----
+FROM rayproject/ray:2.9.0-aarch64
+COPY --from=build /out/runtime /runtime
+# The Ray-actors llm-rank entrypoint (docs/adr/0028): the ray substrate runs this
+# for llm-rank jobs. Baked alongside /runtime so the same image serves both the Go
+# batch path (every other job type) and the Python actors path (llm-rank).
+COPY deploy/ray/llm_rank_ray.py /llm_rank_ray.py
