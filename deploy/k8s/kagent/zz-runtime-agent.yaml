@@ -4,20 +4,22 @@
 # whose metadata carries the per-job parameters and the ZZ-minted job token.
 #
 # This resource holds only the STATIC configuration — the per-job values (job
-# type, token, provider, item) ride the task metadata, so they are absent here:
-#   - ZZ_BASE_URL   the web tier, by FQDN: the agent runs in the kagent namespace
-#                   and ZZ in zumble-zay, so a short name would not resolve.
+# type, provider, item, and the single-use redemption ticket) ride the task
+# metadata, so they are absent here:
+#   - ZZ_BASE_URL    the web tier. The agent runs in ZZ's own namespace (the
+#                    kagent controller reconciles Agent CRs cluster-wide), so a
+#                    short in-namespace name resolves — no cross-namespace FQDN.
 #   - ZZ_AI_ENDPOINT the in-cluster agentgateway, which holds the provider key and
-#                   injects it — so no model token is set here (and none has to
-#                   cross namespaces).
+#                    injects it — so no model token is set here.
 #
-# Dev-only scaffolding: the image and FQDNs match `make dev-up`'s dev overlay.
-# Applied by `make kagent-install` (LAUNCHER=kagent) after the image is kind-loaded.
+# Dev-only scaffolding: the image and names match `make dev-up`'s dev overlay.
+# Applied by `make dev-up` (LAUNCHER=kagent) AFTER the overlay creates the
+# namespace and the runtime image is kind-loaded.
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
   name: zz-runtime
-  namespace: kagent
+  namespace: zumble-zay
 spec:
   description: Zumble-Zay agent runtime (A2A BYO) — runs ingest/enrich/rank/converse/research jobs dispatched by the ZZ orchestrator.
   type: BYO
@@ -27,8 +29,8 @@ spec:
       imagePullPolicy: IfNotPresent
       env:
         - name: ZZ_BASE_URL
-          value: http://zumble-zay.zumble-zay.svc.cluster.local:8080
+          value: http://zumble-zay:8080
         - name: ZZ_AI_ENDPOINT
-          value: http://zumble-zay-agentgateway.zumble-zay.svc.cluster.local/chat/completions
+          value: http://zumble-zay-agentgateway/chat/completions
         - name: ZZ_AI_MODEL
           value: claude-opus-4.8

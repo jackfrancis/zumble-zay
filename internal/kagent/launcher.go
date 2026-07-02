@@ -27,8 +27,14 @@ const (
 	// FQDN because the orchestrator and the kagent controller run in different
 	// namespaces, where a short "service.namespace" would resolve but the bare
 	// service name would not (the cross-namespace DNS lesson of docs/adr/0027).
-	defaultEndpoint  = "http://kagent-controller.kagent.svc.cluster.local:8083"
-	defaultNamespace = "kagent"
+	defaultEndpoint = "http://kagent-controller.kagent.svc.cluster.local:8083"
+	// defaultNamespace is where the ZZ BYO agent runs. The kagent controller
+	// reconciles Agent CRs cluster-wide (ClusterRole-bound, no watch-namespace
+	// restriction), so ZZ runs its agent in its own namespace rather than kagent's:
+	// ZZ owns the runtime's NetworkPolicy and secrets, and the agent reaches the web
+	// tier and agentgateway by short in-namespace name. The controller endpoint
+	// above stays in the kagent namespace regardless (only the agent moved).
+	defaultNamespace = "zumble-zay"
 	defaultAgentName = "zz-runtime"
 )
 
@@ -59,11 +65,12 @@ var (
 
 // build constructs the launcher from KAGENT_* environment, read here (not from
 // the shared config) so this substrate adds nothing to internal/config and stays
-// merge-clean with other concurrent substrates (docs/adr/0024, 0027). All three
-// settings default to a standard kagent install, so LAUNCHER=kagent works out of
-// the box; each is overridable. The static runtime configuration (ZZ base URL,
-// model endpoint/token) is deliberately not read here — it lives on the durable
-// agent's Deployment, not on each dispatch.
+// merge-clean with other concurrent substrates (docs/adr/0024, 0027). The
+// defaults target a standard kagent install with the ZZ agent in ZZ's own
+// namespace, so LAUNCHER=kagent works out of the box; each is overridable. The
+// static runtime configuration (ZZ base URL, model endpoint/token) is
+// deliberately not read here — it lives on the durable agent's Deployment, not on
+// each dispatch.
 func build(_ *config.Config, log *slog.Logger) (orchestrator.Launcher, error) {
 	endpoint := strings.TrimRight(getenvOr("KAGENT_ENDPOINT", defaultEndpoint), "/")
 	namespace := getenvOr("KAGENT_AGENT_NAMESPACE", defaultNamespace)

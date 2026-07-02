@@ -233,9 +233,10 @@ opensandbox-install:
 # Install kagent into the kind cluster so LAUNCHER=kagent has a control plane to
 # dispatch to (docs/adr/0024): the published CRDs + controller Helm charts (with a
 # dummy model provider — the ZZ BYO agent routes model calls through the
-# agentgateway, not kagent's ModelConfig), then the zz-runtime BYO Agent, which
-# kagent reconciles into the durable Deployment the orchestrator dispatches to.
-# The Agent's image must be kind-loaded first (dev-up does this).
+# agentgateway, not kagent's ModelConfig). The zz-runtime BYO Agent itself is
+# applied by dev-up AFTER the overlay creates the zumble-zay namespace it lives in
+# (the kagent controller reconciles Agent CRs cluster-wide), reconciled into the
+# durable Deployment the orchestrator dispatches to.
 kagent-install:
 	@command -v helm >/dev/null || { echo "helm not installed (https://helm.sh)"; exit 1; }
 	helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
@@ -244,7 +245,6 @@ kagent-install:
 		--version $(KAGENT_VERSION) --namespace $(KAGENT_NAMESPACE) \
 		--set providers.default=openAI --set providers.openAI.apiKey=sk-kagent-dev-unused \
 		--wait --timeout 360s
-	kubectl apply -f deploy/k8s/kagent/zz-runtime-agent.yaml
 
 # Export the orchestrator image to a portable archive (docs/adr/0023).
 image-orchestrator-save: image-orchestrator
@@ -337,16 +337,23 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 		$(MAKE) kind-load-runtime-shell opensandbox-install; \
 	fi
 	# Optional kagent substrate (docs/adr/0024): load the A2A runtime-server image
-	# and install kagent (control plane + the zz-runtime BYO Agent) so the
-	# orchestrator can dispatch jobs to a durable agent. Only when selected. The
-	# orchestrator's LAUNCHER + KAGENT_* defaults (kagent-controller.kagent, the
-	# zz-runtime agent) need no extra env, so the generic LAUNCHER override below is
-	# all the orchestrator wiring required.
+	# and install the kagent control plane so the orchestrator can dispatch jobs to
+	# a durable agent. Only when selected. The zz-runtime BYO Agent is applied after
+	# the overlay (below), since it now lives in the zumble-zay namespace. The
+	# orchestrator's LAUNCHER + KAGENT_* defaults need no extra env, so the generic
+	# LAUNCHER override below is all the orchestrator wiring required.
 	@if [ "$(LAUNCHER)" = "kagent" ]; then \
-		echo "loading A2A runtime image + installing kagent"; \
+		echo "loading A2A runtime image + installing the kagent control plane"; \
 		$(MAKE) kind-load-runtime-a2a kagent-install; \
 	fi
 	kubectl apply -k deploy/k8s/overlays/dev
+	# The kagent BYO Agent lives in the zumble-zay namespace (the kagent controller
+	# reconciles cluster-wide), so it is applied here — after the overlay creates
+	# that namespace, not in kagent-install which runs before it exists.
+	@if [ "$(LAUNCHER)" = "kagent" ]; then \
+		echo "applying the zz-runtime BYO Agent in the $(KUBE_NS) namespace"; \
+		kubectl apply -f deploy/k8s/kagent/zz-runtime-agent.yaml; \
+	fi
 	# Select the launcher on the orchestrator when it differs from the ConfigMap
 	# default (k8s-job): an explicit container env wins over envFrom, so this
 	# overrides the deployed LAUNCHER without editing the kustomize ConfigMap.
@@ -382,7 +389,7 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	# asynchronously), and the next dev-up adopts the reloaded image.
 	@if [ "$(LAUNCHER)" = "kagent" ]; then \
 		echo "restarting the zz-runtime agent to adopt the reloaded image"; \
-		kubectl -n $(KAGENT_NAMESPACE) rollout restart deploy/zz-runtime 2>/dev/null || true; \
+		kubectl -n $(KUBE_NS) rollout restart deploy/zz-runtime 2>/dev/null || true; \
 	fi
 	@echo
 	@echo "zumble-zay is running. Expose it with:  make dev-forward"

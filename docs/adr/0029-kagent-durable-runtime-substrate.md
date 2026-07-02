@@ -134,10 +134,12 @@ completes via the runtime callback.
   builds + loads the `runtime-a2a` image, `helm install`s the kagent CRDs +
   controller (with a **dummy** provider key — the BYO agent calls the model
   through ZZ's agentgateway, not a kagent `ModelConfig`, so no real key is
-  needed), applies the BYO `Agent` CR, and rollout-restarts the standing agent so
-  it adopts the reloaded `:dev` image. The agent runs in the `kagent` namespace and
-  reaches the model via the agentgateway FQDN, so **no AI token crosses
-  namespaces**; a bare `make dev-up` is byte-identical.
+  needed), applies the BYO `Agent` CR after the overlay creates the namespace, and
+  rollout-restarts the standing agent so it adopts the reloaded `:dev` image. The
+  agent runs in **ZZ's own namespace** (the kagent controller reconciles Agent CRs
+  cluster-wide), so it reaches the web tier and the agentgateway by short
+  in-namespace name and ZZ owns the runtime's NetworkPolicy and secrets; the AI
+  token still never leaves that namespace. A bare `make dev-up` is byte-identical.
 
 ## Consequences
 
