@@ -1,4 +1,4 @@
-# ADR 0029: Ray-actors execution path for llm-rank (intra-job parallelism)
+# ADR 0031: Ray-actors execution path for llm-rank (intra-job parallelism)
 
 ## Status
 Proposed

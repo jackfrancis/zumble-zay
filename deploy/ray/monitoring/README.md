@@ -71,7 +71,7 @@ curl -s localhost:9090/api/v1/targets \
 - This is a **heavy** footprint (Grafana, operator, alertmanager, node-exporter,
   kube-state-metrics). On the local podman VM, ensure it has enough memory
   (`podman machine set --memory 12288`).
-- Per-actor series are visible: the llm-rank actors path (docs/adr/0029) shows up
+- Per-actor series are visible: the llm-rank actors path (docs/adr/0031) shows up
   as `ray::Scorer.score` components in `ray_component_*` metrics.
 - Teardown: `helm -n prometheus-system uninstall prometheus` and
   `kubectl delete ns prometheus-system`.

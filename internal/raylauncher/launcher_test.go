@@ -37,7 +37,7 @@ func testLauncher() *Launcher {
 // TestEntrypointActorModeForLLMRank verifies that actor mode swaps the entrypoint
 // to the Ray-actors program for llm-rank jobs only, leaving other job types on
 // /runtime and leaving the default (non-actor) launcher entirely on /runtime
-// (docs/adr/0029).
+// (docs/adr/0031).
 func TestEntrypointActorModeForLLMRank(t *testing.T) {
 	base := testLauncher()
 
