@@ -14,6 +14,7 @@
 package agenta2a
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -23,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/jackfrancis/zumble-zay/internal/agent"
 )
@@ -146,9 +148,9 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, err := s.paramsFromTask(req.Params.Message.Metadata)
+	p, err := s.paramsFromTask(r.Context(), req.Params.Message.Metadata)
 	if err != nil {
-		// Never log the metadata itself — it carries the job token.
+		// Never log the metadata itself — it carries the job credential.
 		s.log.Warn("a2a task rejected: invalid job parameters", "err", err)
 		writeTask(w, req.ID, req.Params.Message, "failed", "invalid job parameters: "+err.Error())
 		return
@@ -178,11 +180,17 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 // paramsFromTask reconstructs RunParams by reading each ZZ_* key from the task
 // metadata first and falling back to the process environment. This reuses the
 // launchers' agent.ParamsFromEnv verbatim, so the injection contract has exactly
-// one decoder: per-job values (job type, token, provider, item) come from
-// metadata; static config (base URL, model endpoint/token) from the Deployment
+// one decoder: per-job values (job type, provider, item) come from metadata;
+// static config (base URL, model endpoint/token) from the Deployment
 // environment; and the model token, never emitted into metadata, stays env-only.
-func (s *Server) paramsFromTask(metadata map[string]any) (agent.RunParams, error) {
-	lookup := func(key string) string {
+//
+// The job credential is the pull-path's twist (docs/adr/0029): kagent persists
+// task metadata, so instead of the live token the metadata carries a single-use
+// ticket. When there is a ticket and no token, redeem it (POST /agent/token) for
+// the job token and present that to the one decoder — so ParamsFromEnv stays
+// unchanged and there is exactly one credential path from here on.
+func (s *Server) paramsFromTask(ctx context.Context, metadata map[string]any) (agent.RunParams, error) {
+	base := func(key string) string {
 		if v, ok := metadata[key]; ok {
 			if str, ok := v.(string); ok {
 				return str
@@ -191,7 +199,59 @@ func (s *Server) paramsFromTask(metadata map[string]any) (agent.RunParams, error
 		}
 		return s.getenv(key)
 	}
+	lookup := base
+	if base(agent.EnvToken) == "" {
+		if ticket := base(agent.EnvTicket); ticket != "" {
+			tok, err := redeemTicket(ctx, base(agent.EnvBaseURL), ticket)
+			if err != nil {
+				return agent.RunParams{}, fmt.Errorf("redeem job ticket: %w", err)
+			}
+			lookup = func(key string) string {
+				if key == agent.EnvToken {
+					return tok
+				}
+				return base(key)
+			}
+		}
+	}
 	return agent.ParamsFromEnv(lookup)
+}
+
+// redeemTicket exchanges a single-use ticket for the job token at the web tier's
+// POST /agent/token (docs/adr/0029). The ticket rides the request body, never a
+// header; the redeemed token replaces it before any job logic runs.
+func redeemTicket(ctx context.Context, baseURL, ticket string) (string, error) {
+	if baseURL == "" {
+		return "", fmt.Errorf("no base URL to redeem a ticket against")
+	}
+	body, err := json.Marshal(map[string]string{"ticket": ticket})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/agent/token", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.AccessToken == "" {
+		return "", fmt.Errorf("empty token")
+	}
+	return out.AccessToken, nil
 }
 
 // writeTask writes a JSON-RPC result carrying an A2A task in a terminal state.

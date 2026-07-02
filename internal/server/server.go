@@ -60,6 +60,9 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, v
 	// A runtime reports terminal completion here; the web tier forwards it to the
 	// orchestrator so the job finalizes immediately (docs/adr/0024).
 	completeHandler := api.NewCompleteHandler(cp, log)
+	// A pull-substrate runtime (kagent) redeems its single-use ticket for the job
+	// token here; the web tier forwards to the orchestrator (docs/adr/0029).
+	tokenHandler := api.NewTokenHandler(cp, log)
 	webHandler := webui.New(sessions, store, cp, authH, convEnabled)
 
 	mux := http.NewServeMux()
@@ -128,6 +131,11 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, v
 	// it to the orchestrator (docs/adr/0024). Any authenticated workload may report
 	// its own job (identified by the token's job id), so it needs only signals:read.
 	mux.Handle("POST /agent/complete", authenticator.RequireScope(principal.ScopeSignalsRead, http.HandlerFunc(completeHandler.Complete)))
+	// Ticket redemption for the pull-path (docs/adr/0029): a pull-substrate runtime
+	// exchanges its single-use ticket for the job token. It has no token yet, so
+	// this route is not behind RequireScope — the ticket is the authorization, and
+	// the orchestrator issues exactly one per dispatched job.
+	mux.Handle("POST /agent/token", http.HandlerFunc(tokenHandler.Redeem))
 	// Converse write-back: a spawned converse runtime posts the assistant's reply
 	// for an item here (docs/adr/0019).
 	mux.Handle("POST /agent/thread", authenticator.RequireScope(principal.ScopeMetadataWrite, http.HandlerFunc(agentThreadHandler.Append)))

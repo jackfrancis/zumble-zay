@@ -67,7 +67,7 @@ func TestParamsFromTaskMergesMetadataAndEnv(t *testing.T) {
 		agent.EnvBaseURL: "https://zz.internal",
 		agent.EnvAIToken: "model-secret", // env-only, never in metadata
 	})))
-	p, err := srv.paramsFromTask(map[string]any{
+	p, err := srv.paramsFromTask(context.Background(), map[string]any{
 		agent.EnvJobType:  "llm-rank",
 		agent.EnvToken:    "job-token-xyz",
 		agent.EnvProvider: "github",
@@ -84,6 +84,41 @@ func TestParamsFromTaskMergesMetadataAndEnv(t *testing.T) {
 	}
 	if p.AIToken != "model-secret" {
 		t.Errorf("AIToken = %q, want it from env only", p.AIToken)
+	}
+}
+
+func TestParamsFromTaskRedeemsTicket(t *testing.T) {
+	// A fake web tier that redeems a ticket for a job token at POST /agent/token,
+	// the pull-path (docs/adr/0029): the metadata carries a ticket, not the token.
+	var gotTicket string
+	zz := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/agent/token" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req struct {
+			Ticket string `json:"ticket"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotTicket = req.Ticket
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "redeemed-token", "token_type": "Bearer", "expires_in": 600})
+	}))
+	defer zz.Close()
+
+	srv := New(WithGetenv(env(map[string]string{agent.EnvBaseURL: zz.URL})))
+	p, err := srv.paramsFromTask(context.Background(), map[string]any{
+		agent.EnvJobType: "llm-rank",
+		agent.EnvTicket:  "ticket-abc", // a ticket, not a token
+	})
+	if err != nil {
+		t.Fatalf("paramsFromTask: %v", err)
+	}
+	if gotTicket != "ticket-abc" {
+		t.Errorf("redeemed ticket = %q, want ticket-abc", gotTicket)
+	}
+	if p.Token != "redeemed-token" {
+		t.Errorf("Token = %q, want the redeemed token", p.Token)
 	}
 }
 

@@ -98,7 +98,11 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   token-exchange endpoint (`POST /control/token`, ADR 0024) issues only
   policy-scoped, single-user, short-TTL job tokens, and authenticates the caller
   behind the `CallerAuthenticator` seam (shared bearer today; per-service
-  platform OIDC is the hardening).
+  platform OIDC is the hardening). A durable runtime that must not persist a live
+  token (kagent) instead receives a **single-use redemption ticket** and exchanges
+  it for the token at `POST /agent/token` → `POST /control/redeem` (ADR 0030): the
+  ticket is job-bound, short-TTL, consumed on first use, and is itself the
+  authorization, so no minting secret rides on the runtime.
 - Token vault encrypted at rest (KMS) once persisted. Agents connect to
   providers **directly** with a short-lived credential **vended by ZZ on demand**
   (ADR 0006); ZZ never proxies provider data. ZZ core packages must not import a
@@ -157,7 +161,8 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   controller installs) are additive, never edits to the base defaults (`LAUNCHER`
   stays `k8s-job`). Reserve the next free ADR number and add its README row in
   your first PR so two efforts don't claim the same one — reserved so far:
-  **0027** opensandbox, **0028** ray/kuberay, **0029** kagent.
+  **0027** opensandbox, **0028** ray/kuberay, **0029** kagent, **0030** job-token
+  pull-path.
 
 ## Build / dev / test
 
@@ -236,15 +241,23 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    build tag; `KAGENT_ENDPOINT`/`KAGENT_AGENT_NAMESPACE`/`KAGENT_AGENT_NAME` read in
    `build()`, so `internal/config` is untouched). The runtime side wraps `agent.Run`
    behind an A2A server (`internal/agenta2a` + `cmd/runtime-a2a`), reusing
-   `agent.ParamsFromEnv` verbatim; per-job params + the short-TTL job token ride in
-   `message.metadata` (the controller strips headers but forwards metadata), static
-   config on the durable Deployment env. Because the controller caps a blocking
+   `agent.ParamsFromEnv` verbatim; per-job params ride in `message.metadata` (the
+   controller strips headers but forwards metadata), static config on the durable
+   Deployment env. The credential in the metadata is **not** the job token but a
+   **single-use redemption ticket** (`ZZ_JOB_TICKET`, the pull-path): the
+   orchestrator mints a ticket bound to the job (a `PullTokenLauncher`), and the
+   runtime exchanges it at `POST /agent/token` for the token before running, so the
+   live token never rides kagent's persisted task history. Because the controller
+   caps a blocking
    `message/send` at ~180s, it is an `AsyncLauncher`: the runtime runs the job
    detached (its own deadline, `blocking:false`) and completion is the callback race
    (ADR 0025), so the A2A task result is irrelevant. Converse and rank are one
    archetype on the standing agent; converse has its own 15-min budget. Select with
-   `LAUNCHER=kagent`. Remaining: the token-exchange pull-path (keep the token out of
-   kagent's persisted task history) and `KueueLauncher` (admission/quota).
+   `LAUNCHER=kagent`. The token-exchange pull-path is DONE (ADR 0030 — single-use ticket +
+   `POST /agent/token` → `POST /control/redeem`, an in-memory ticket store minting
+   the job token — with the dispatched job's id — on redemption); remaining is
+   transport + caller-identity hardening (mTLS/`NetworkPolicy` on the `/agent/*`
+   plane and per-service OIDC, ADR 0024) and `KueueLauncher` (admission/quota).
 7. **Prompt & context tuning is now the primary correctness lever (ADR 0015).**
    The LLM is authoritative for the four axes, so ranking quality is steered in
    `internal/llm/prompt.go` — sharper axis definitions, the user's priorities and

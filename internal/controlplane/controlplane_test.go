@@ -21,6 +21,8 @@ type fakeController struct {
 	research  [][2]string
 	completed [][2]string
 	active    map[string]bool
+	redeemed  []string
+	redeemTok string
 }
 
 func (f *fakeController) EnsureBackfill(_ context.Context, owner string) error {
@@ -54,6 +56,13 @@ func (f *fakeController) CompleteJob(jobID, errMsg string) {
 	f.mu.Lock()
 	f.completed = append(f.completed, [2]string{jobID, errMsg})
 	f.mu.Unlock()
+}
+
+func (f *fakeController) RedeemTicket(ticket string) (string, time.Duration, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.redeemed = append(f.redeemed, ticket)
+	return f.redeemTok, 10 * time.Minute, nil
 }
 
 func TestLocalDelegatesToController(t *testing.T) {
@@ -147,6 +156,45 @@ func TestCompleteForwardsToController(t *testing.T) {
 	defer fc.mu.Unlock()
 	if len(fc.completed) != 1 || fc.completed[0] != [2]string{"job-1", "boom"} {
 		t.Fatalf("completion not forwarded to the controller: %v", fc.completed)
+	}
+}
+
+func TestLocalRedeemTicket(t *testing.T) {
+	fc := &fakeController{active: map[string]bool{}, redeemTok: "job-token"}
+	c := controlplane.NewLocal(fc)
+	tok, exp, err := c.RedeemTicket(context.Background(), "t1")
+	if err != nil {
+		t.Fatalf("RedeemTicket: %v", err)
+	}
+	if tok != "job-token" || exp != 600 {
+		t.Fatalf("unexpected: tok=%q exp=%d (want job-token / 600s)", tok, exp)
+	}
+	if len(fc.redeemed) != 1 || fc.redeemed[0] != "t1" {
+		t.Fatalf("ticket not forwarded to the controller: %v", fc.redeemed)
+	}
+}
+
+func TestRedeemTicketForwardsToController(t *testing.T) {
+	const token = "control-token-abc"
+	fc := &fakeController{active: map[string]bool{}, redeemTok: "minted-job-token"}
+	h := controlplane.NewHandler(fc, []byte(token), nil)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := controlplane.NewHTTP(ts.URL, ts.Client(), []byte(token))
+	tok, exp, err := c.RedeemTicket(context.Background(), "ticket-xyz")
+	if err != nil {
+		t.Fatalf("RedeemTicket: %v", err)
+	}
+	if tok != "minted-job-token" || exp != 600 {
+		t.Fatalf("unexpected redeem response: tok=%q exp=%d", tok, exp)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.redeemed) != 1 || fc.redeemed[0] != "ticket-xyz" {
+		t.Fatalf("ticket not forwarded to the controller: %v", fc.redeemed)
 	}
 }
 

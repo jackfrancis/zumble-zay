@@ -73,7 +73,7 @@ func TestDispatchSendsJobMetadataNonBlockingAndAccepts(t *testing.T) {
 
 	handle, err := newTestLauncher(srv.URL).Dispatch(context.Background(), orchestrator.JobSpec{
 		JobID: "j1", Type: orchestrator.JobLLMRank, Provider: "github", ItemID: "gh/o/r#7",
-	}, "job-token-xyz")
+	}, "ticket-xyz")
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
@@ -86,9 +86,15 @@ func TestDispatchSendsJobMetadataNonBlockingAndAccepts(t *testing.T) {
 	if cap.blocking {
 		t.Error("send must be non-blocking so the controller acknowledges immediately")
 	}
-	if cap.metadata[agent.EnvJobType] != "llm-rank" || cap.metadata[agent.EnvToken] != "job-token-xyz" ||
+	if cap.metadata[agent.EnvJobType] != "llm-rank" || cap.metadata[agent.EnvTicket] != "ticket-xyz" ||
 		cap.metadata[agent.EnvProvider] != "github" || cap.metadata[agent.EnvItemID] != "gh/o/r#7" {
 		t.Errorf("metadata = %+v", cap.metadata)
+	}
+	// The live token must never ride the metadata: the pull-path carries a
+	// single-use ticket instead, so kagent's persisted task history never holds a
+	// usable credential (docs/adr/0029).
+	if _, ok := cap.metadata[agent.EnvToken]; ok {
+		t.Error("metadata must carry the ticket, not the job token")
 	}
 	// Static config must never ride the metadata: an empty ZZ_BASE_URL would
 	// shadow the durable agent's configured value and fail its param validation.
@@ -178,5 +184,13 @@ func TestBuildDefaultsAndEnvOverride(t *testing.T) {
 	ov := l2.(*Launcher)
 	if ov.client.baseURL != "http://custom:9000" || ov.namespace != "ns2" || ov.agentName != "myagent" {
 		t.Errorf("env override wrong: endpoint=%q ns=%q name=%q", ov.client.baseURL, ov.namespace, ov.agentName)
+	}
+}
+
+func TestPullsTokenIsTrue(t *testing.T) {
+	// kagent is a pull substrate: the orchestrator hands it a single-use ticket,
+	// not the job token, so the token stays out of kagent's task history.
+	if !newTestLauncher("http://unused").PullsToken() {
+		t.Error("kagent launcher must report PullsToken()==true (docs/adr/0029)")
 	}
 }

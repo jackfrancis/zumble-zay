@@ -8,6 +8,12 @@ enrich, rank, and research dispatched through the kagent controller to a standin
 BYO agent and completed via the ZZ callback; converse works given the
 detached-completion and 15-minute-budget decisions below.
 
+**Refined by [0030](0030-job-token-pull-path.md):** the per-job credential is no
+longer the job token in `message.metadata` but a single-use redemption ticket the
+runtime exchanges for the token, keeping the live token out of the controller's
+persisted task history. That ADR is the decision record for the mechanism this one
+describes; 0029's other decisions stand.
+
 Builds on [0012](0012-kubernetes-native-substrates-swappable.md) (substrates are
 swappable behind `orchestrator.Launcher`), [0024](0024-agent-runtime-portability.md)
 (the launcher registry + async dispatch + token exchange), and
@@ -56,8 +62,10 @@ Three things had to be resolved before wiring it up.
    **strips custom HTTP headers** (`Authorization`, `X-*`) before they reach the
    agent, but **forwards `params.message.metadata` intact**. Per-job data must
    therefore ride in A2A message metadata. Because the controller persists task
-   history, that metadata can land in its Postgres store — so the token must be
-   **short-TTL** (which aligns with ZZ's Ed25519 job tokens).
+   history to Postgres, a live token in that metadata would sit at rest for its
+   TTL — so the metadata carries a **single-use redemption ticket** instead of the
+   token, and the runtime exchanges it for the token at start (the pull-path in the
+   Decision), so the token itself never persists.
 3. **A synchronous invocation cap.** The controller caps a *blocking*
    `message/send` at ~180s (proven live: a substantive converse failed at exactly
    180.000s with `context canceled` — the proxied connection was cut, not a ZZ
@@ -86,13 +94,22 @@ completes via the runtime callback.
   params decoder across every substrate and `AIToken` stays env-only. The
   runtime's job dispatch, credential vend, ingest, and completion logic are reused
   unchanged — kagent only changes *how the runtime is invoked*, not what it does.
-- **Per-job in metadata, static on the Deployment.** The launcher puts only
-  per-job keys in `message.metadata` (`ZZ_JOB_TYPE`, `ZZ_JOB_TOKEN`, and
-  `ZZ_PROVIDER`/`ZZ_ITEM_ID` when set), via the shared `agent.Env*` constants.
-  Static config (`ZZ_BASE_URL`, `ZZ_AI_*`) lives on the durable agent's Deployment
-  env. Empty optional keys are **omitted**, not sent blank, because the
-  metadata-first lookup would otherwise let an empty value shadow the Deployment
-  env and fail validation.
+- **Per-job in metadata, static on the Deployment, a ticket in place of the
+  token.** The launcher puts only per-job keys in `message.metadata`
+  (`ZZ_JOB_TYPE`, `ZZ_PROVIDER`/`ZZ_ITEM_ID` when set), via the shared
+  `agent.Env*` constants. Static config (`ZZ_BASE_URL`, `ZZ_AI_*`) lives on the
+  durable agent's Deployment env. Empty optional keys are **omitted**, not sent
+  blank, because the metadata-first lookup would otherwise let an empty value
+  shadow the Deployment env and fail validation. Crucially the credential is
+  **not** the job token but a **single-use redemption ticket** (`ZZ_JOB_TICKET`):
+  the orchestrator mints a ticket bound to the dispatched job (a launcher that
+  wants one implements the `PullTokenLauncher` seam), and the runtime exchanges it
+  for the job token at `POST /agent/token` before running — so the live token
+  never rides the controller's persisted metadata. The redeemed token carries the
+  dispatched job's id, so the completion callback still correlates. The web tier
+  proxies redemption to the orchestrator, which consumes the ticket (single-use)
+  and mints; the ticket is itself the authorization, so the runtime holds no
+  standing minting secret.
 - **Detached background run + `blocking:false` + callback completion (ADR 0025).**
   This is the resolution of the 180s cap. The A2A server sets
   `ReportCompletion=true`, runs `agent.Run` in a **background goroutine with its
@@ -136,11 +153,16 @@ completes via the runtime callback.
   and ZZ must rollout-restart it to adopt a new image. This is the accepted cost of
   putting a durable runtime behind the ephemeral-authorization model (see Context /
   ADR 0002).
-- **The job token can reach kagent's task-history store.** Mitigated now by
-  short-TTL tokens. The clean fix is the **token-exchange pull-path** (ADR 0024's
-  `POST /control/token`): the runtime would exchange a job identifier for its token
-  at spawn rather than receive it in metadata, keeping the token out of Postgres
-  entirely. Deferred, not done.
+- **The live token never reaches kagent's task-history store.** The metadata
+  carries a single-use redemption ticket, not the token (the pull-path in the
+  Decision), so the controller's persisted task history holds only an inert
+  capability: single-use, short-TTL, bound to one job, and consumed the moment the
+  runtime redeems it (seconds after dispatch). No standing minting secret lands on
+  the runtime either — the ticket authorizes exactly one job-token mint. The
+  remaining exposure is transport and caller identity, not a token at rest: the
+  redemption hop is cluster-internal HTTP today, so mTLS (a service mesh) /
+  `NetworkPolicy` on the `/agent/*` plane and a per-service OIDC caller identity
+  (ADR 0024) are the follow-ups.
 - **The 180s cap is fully retired.** Because completion is callback-driven and the
   send is non-blocking, no ZZ job is bounded by the controller's synchronous proxy
   window — only by ZZ's own per-job deadline. A blocking, synchronous launcher was

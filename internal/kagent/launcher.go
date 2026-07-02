@@ -52,8 +52,9 @@ type Launcher struct {
 }
 
 var (
-	_ orchestrator.Launcher      = (*Launcher)(nil)
-	_ orchestrator.AsyncLauncher = (*Launcher)(nil)
+	_ orchestrator.Launcher          = (*Launcher)(nil)
+	_ orchestrator.AsyncLauncher     = (*Launcher)(nil)
+	_ orchestrator.PullTokenLauncher = (*Launcher)(nil)
 )
 
 // build constructs the launcher from KAGENT_* environment, read here (not from
@@ -86,16 +87,18 @@ func build(_ *config.Config, log *slog.Logger) (orchestrator.Launcher, error) {
 // non-blocking, so the kagent controller acknowledges immediately instead of
 // holding the connection until the job finishes — this is what keeps a long job
 // (a real converse review) from tripping the controller's synchronous-proxy
-// timeout. The job parameters — job type, the minted job token, provider, and any
-// item id — ride the message metadata, the channel a kagent controller forwards
-// intact to the agent (HTTP headers are stripped, so metadata is the only
-// reliable carrier).
-func (l *Launcher) Dispatch(ctx context.Context, spec orchestrator.JobSpec, token string) (orchestrator.Handle, error) {
+// timeout. The job parameters — job type, provider, any item id, and a single-use
+// redemption ticket in place of the token (docs/adr/0029) — ride the message
+// metadata, the channel a kagent controller forwards intact to the agent (HTTP
+// headers are stripped, so metadata is the only reliable carrier). Carrying a
+// ticket, not the token, keeps the live credential out of the controller's
+// persisted task history; the runtime redeems it for the token before running.
+func (l *Launcher) Dispatch(ctx context.Context, spec orchestrator.JobSpec, ticket string) (orchestrator.Handle, error) {
 	if l.log != nil {
 		l.log.Info("kagent dispatch", "job", spec.JobID, "type", spec.Type, "agent", l.namespace+"/"+l.agentName)
 	}
 	prompt := "Run Zumble-Zay job " + string(spec.Type)
-	res, err := l.client.sendTask(ctx, l.namespace, l.agentName, prompt, taskMetadata(spec, token))
+	res, err := l.client.sendTask(ctx, l.namespace, l.agentName, prompt, taskMetadata(spec, ticket))
 	handle := orchestrator.Handle{Kind: handleKind, Ref: res.TaskID}
 	if err != nil {
 		return handle, fmt.Errorf("kagent dispatch %s: %w", spec.Type, err)
@@ -122,25 +125,34 @@ func (l *Launcher) Await(ctx context.Context, _ orchestrator.Handle) error {
 // Launch composes Dispatch and Await so a direct blocking call is available
 // (docs/adr/0009); the orchestrator prefers the split async path so completion is
 // driven by the callback rather than by the deadline (docs/adr/0024).
-func (l *Launcher) Launch(ctx context.Context, spec orchestrator.JobSpec, token string) (orchestrator.Handle, error) {
-	handle, err := l.Dispatch(ctx, spec, token)
+func (l *Launcher) Launch(ctx context.Context, spec orchestrator.JobSpec, ticket string) (orchestrator.Handle, error) {
+	handle, err := l.Dispatch(ctx, spec, ticket)
 	if err != nil {
 		return handle, err
 	}
 	return handle, l.Await(ctx, handle)
 }
 
+// PullsToken marks kagent as a pull substrate (docs/adr/0029): its runtime
+// redeems a single-use ticket for the job token, so the orchestrator hands
+// Dispatch a ticket rather than the token. This is what keeps the live token out
+// of kagent's persisted task history — the durable controller stores the task
+// metadata, so a single-use, short-TTL ticket is the right thing to leave there.
+func (l *Launcher) PullsToken() bool { return true }
+
 // taskMetadata is the per-job subset of the injection contract carried in the A2A
-// message metadata. Only per-job values travel here — job type, the minted token,
-// provider, and item — because the durable agent already holds the static config
-// (ZZ base URL, model endpoint/token) in its Deployment environment. The keys are
-// the canonical agent.Env* names, so the agent's decoder (agent.ParamsFromEnv,
-// via cmd/runtime-a2a) reconstructs RunParams without any drift. Empty optional
-// values are omitted so they cannot shadow the agent's environment.
-func taskMetadata(spec orchestrator.JobSpec, token string) map[string]string {
+// message metadata. Only per-job values travel here — job type, provider, item,
+// and a single-use redemption ticket in place of the token — because the durable
+// agent already holds the static config (ZZ base URL, model endpoint/token) in
+// its Deployment environment. The keys are the canonical agent.Env* names, so the
+// agent's decoder (agent.ParamsFromEnv, via cmd/runtime-a2a) reconstructs
+// RunParams without any drift; the runtime redeems the ticket for the job token
+// first (docs/adr/0029). Empty optional values are omitted so they cannot shadow
+// the agent's environment.
+func taskMetadata(spec orchestrator.JobSpec, ticket string) map[string]string {
 	m := map[string]string{
 		agent.EnvJobType: string(spec.Type),
-		agent.EnvToken:   token,
+		agent.EnvTicket:  ticket,
 	}
 	if spec.Provider != "" {
 		m[agent.EnvProvider] = spec.Provider

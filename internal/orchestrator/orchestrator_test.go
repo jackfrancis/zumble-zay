@@ -39,6 +39,78 @@ func (b *blockingLauncher) lastToken() string {
 	return b.tokens[len(b.tokens)-1]
 }
 
+// pullLauncher is a PullTokenLauncher: it captures the credential the
+// orchestrator hands it, which for a pull substrate is a single-use redemption
+// ticket rather than the job token (docs/adr/0029).
+type pullLauncher struct{ creds chan string }
+
+func (p *pullLauncher) Launch(_ context.Context, spec orchestrator.JobSpec, cred string) (orchestrator.Handle, error) {
+	select {
+	case p.creds <- cred: // capture the first; later chained stages are dropped
+	default:
+	}
+	return orchestrator.Handle{Kind: "pull", Ref: spec.JobID}, nil
+}
+
+func (p *pullLauncher) PullsToken() bool { return true }
+
+func TestPullLauncherGetsSingleUseTicketNotToken(t *testing.T) {
+	m := mint.NewMinterFromSeed([]byte(testSecret), time.Minute)
+	pl := &pullLauncher{creds: make(chan string, 1)}
+	o := orchestrator.New(m, pl, nil)
+	defer o.Stop()
+
+	if err := o.EnsureBackfill(context.Background(), "github:1"); err != nil {
+		t.Fatalf("EnsureBackfill: %v", err)
+	}
+	var ticket string
+	select {
+	case ticket = <-pl.creds:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime did not start")
+	}
+
+	// A pull substrate must NOT receive a usable job token: the credential handed
+	// to it is a ticket, which is not a signed token and does not verify.
+	if _, err := m.Verifier().Verify(ticket); err == nil {
+		t.Fatal("pull launcher must receive a ticket, not a verifiable job token")
+	}
+
+	// Redeeming yields the real job token, scoped to the acting user and carrying
+	// the dispatched job's id so the completion callback still correlates.
+	tok, ttl, err := o.RedeemTicket(ticket)
+	if err != nil {
+		t.Fatalf("RedeemTicket: %v", err)
+	}
+	if ttl <= 0 {
+		t.Errorf("ttl = %v, want positive", ttl)
+	}
+	claims, err := m.Verifier().Verify(tok)
+	if err != nil {
+		t.Fatalf("verify redeemed token: %v", err)
+	}
+	if claims.ActingUserID != "github:1" || claims.Provider != "github" || claims.JobID == "" {
+		t.Fatalf("unexpected claims: %+v", claims)
+	}
+	if !hasScope(claims.Scopes, principal.ScopeSignalsRead) {
+		t.Fatalf("redeemed token missing scopes: %+v", claims.Scopes)
+	}
+
+	// Single-use: a second redemption of the same ticket fails.
+	if _, _, err := o.RedeemTicket(ticket); err == nil {
+		t.Fatal("ticket must be single-use; a second redemption should fail")
+	}
+}
+
+func TestRedeemUnknownTicketFails(t *testing.T) {
+	m := mint.NewMinterFromSeed([]byte(testSecret), time.Minute)
+	o := orchestrator.New(m, orchestrator.NoopLauncher{}, nil)
+	defer o.Stop()
+	if _, _, err := o.RedeemTicket("nope"); err == nil {
+		t.Fatal("redeeming an unknown ticket must fail")
+	}
+}
+
 func TestEnsureBackfillDedupesAndMintsScopedToken(t *testing.T) {
 	m := mint.NewMinterFromSeed([]byte(testSecret), time.Minute)
 	fl := &blockingLauncher{started: make(chan orchestrator.JobSpec, 4), release: make(chan struct{})}

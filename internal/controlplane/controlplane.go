@@ -39,6 +39,9 @@ type Client interface {
 	Active(ctx context.Context, ownerID string) (bool, error)
 	// Complete forwards a runtime's terminal completion for a job (docs/adr/0024).
 	Complete(ctx context.Context, jobID, errMsg string) error
+	// RedeemTicket exchanges a pull substrate's single-use ticket for its job
+	// token (docs/adr/0029); expiresIn is the token lifetime in seconds.
+	RedeemTicket(ctx context.Context, ticket string) (token string, expiresIn int, err error)
 }
 
 // Controller is the orchestrator-side surface the Local adapter and the HTTP
@@ -52,6 +55,9 @@ type Controller interface {
 	// CompleteJob delivers a runtime's terminal completion for a job
 	// (docs/adr/0024); an empty errMsg is success.
 	CompleteJob(jobID, errMsg string)
+	// RedeemTicket exchanges a pull substrate's single-use ticket for its job
+	// token (docs/adr/0029). The ticket is itself the authorization.
+	RedeemTicket(ticket string) (token string, ttl time.Duration, err error)
 }
 
 // Local is the co-located control client: it calls an in-process orchestrator
@@ -88,6 +94,16 @@ func (l *Local) Active(_ context.Context, ownerID string) (bool, error) {
 func (l *Local) Complete(_ context.Context, jobID, errMsg string) error {
 	l.c.CompleteJob(jobID, errMsg)
 	return nil
+}
+
+// RedeemTicket redeems a pull substrate's single-use ticket against the
+// co-located orchestrator (docs/adr/0029).
+func (l *Local) RedeemTicket(_ context.Context, ticket string) (string, int, error) {
+	tok, ttl, err := l.c.RedeemTicket(ticket)
+	if err != nil {
+		return "", 0, err
+	}
+	return tok, int(ttl.Seconds()), nil
 }
 
 // HTTP is the remote control client: it calls the orchestrator's control API. It
@@ -127,6 +143,25 @@ func (h *HTTP) Research(ctx context.Context, ownerID, itemID string) error {
 // orchestrator's control API (docs/adr/0024).
 func (h *HTTP) Complete(ctx context.Context, jobID, errMsg string) error {
 	return h.trigger(ctx, "/control/complete", completeRequest{JobID: jobID, Error: errMsg})
+}
+
+// RedeemTicket redeems a pull substrate's single-use ticket against the
+// orchestrator's control API (docs/adr/0029), returning the job token and its
+// lifetime in seconds.
+func (h *HTTP) RedeemTicket(ctx context.Context, ticket string) (string, int, error) {
+	resp, err := h.do(ctx, http.MethodPost, "/control/redeem", ticketRequest{Ticket: ticket})
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "", 0, fmt.Errorf("controlplane: POST /control/redeem: status %d", resp.StatusCode)
+	}
+	var out tokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", 0, fmt.Errorf("controlplane: decode redeem: %w", err)
+	}
+	return out.AccessToken, out.ExpiresIn, nil
 }
 
 // Active reports whether a pipeline pass is still in flight for ownerID.
@@ -214,6 +249,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /control/converse", h.auth(h.converse))
 	mux.HandleFunc("POST /control/research", h.auth(h.research))
 	mux.HandleFunc("POST /control/complete", h.auth(h.complete))
+	mux.HandleFunc("POST /control/redeem", h.auth(h.redeem))
 	mux.HandleFunc("GET /control/active", h.auth(h.active))
 	if h.issuer != nil && h.caller != nil {
 		// Token exchange authenticates the caller itself (RFC 8693-flavored), so it
@@ -296,6 +332,40 @@ func (h *Handler) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	h.c.CompleteJob(req.JobID, req.Error)
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// redeem exchanges a pull substrate's single-use ticket for the job token it was
+// issued for (docs/adr/0029), the orchestrator half of the web tier's POST
+// /agent/token. The ticket is the authorization — single-use, and the
+// orchestrator issues exactly one per dispatched job — so this sits behind the
+// shared control bearer like the other trigger routes; the web tier is the only
+// caller. A failed redemption is coarse (unknown, spent, and expired are
+// indistinguishable) so it reveals nothing.
+func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
+	var req ticketRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Ticket == "" {
+		http.Error(w, "ticket required", http.StatusBadRequest)
+		return
+	}
+	tok, ttl, err := h.c.RedeemTicket(req.Ticket)
+	if err != nil {
+		if h.log != nil {
+			h.log.Warn("ticket redemption rejected", "err", err)
+		}
+		http.Error(w, "invalid ticket", http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(tokenResponse{
+		AccessToken:     tok,
+		IssuedTokenType: "urn:ietf:params:oauth:token-type:access_token",
+		TokenType:       "Bearer",
+		ExpiresIn:       int(ttl.Seconds()),
+	})
 }
 
 // exchange is the RFC 8693-flavored token-exchange endpoint (docs/adr/0024). A
@@ -386,6 +456,12 @@ type request struct {
 type completeRequest struct {
 	JobID string `json:"job_id"`
 	Error string `json:"error,omitempty"`
+}
+
+// ticketRequest is the body of POST /control/redeem: a pull substrate's
+// single-use redemption ticket (docs/adr/0029).
+type ticketRequest struct {
+	Ticket string `json:"ticket"`
 }
 
 type activeResponse struct {

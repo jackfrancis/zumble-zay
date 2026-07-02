@@ -11,6 +11,7 @@ package orchestrator
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -119,6 +120,21 @@ type AsyncLauncher interface {
 	Await(ctx context.Context, handle Handle) error
 }
 
+// PullTokenLauncher marks a Launcher whose runtime obtains its job token by
+// redeeming a single-use ticket, instead of receiving the token at dispatch
+// (docs/adr/0029). When a launcher reports PullsToken, the orchestrator hands
+// Dispatch/Launch a redemption ticket in the token argument; the runtime
+// exchanges it (POST /agent/token) for a job token whose claims — the job id
+// above all — match the dispatched job, so completion still correlates. The
+// point is that the live token never rides a substrate's persisted metadata: a
+// durable control plane (kagent) stores task history, so a single-use, short-TTL
+// ticket is a far smaller exposure at rest than a bearer token. A launcher that
+// does not implement this is pushed the token, exactly as before.
+type PullTokenLauncher interface {
+	Launcher
+	PullsToken() bool
+}
+
 // Job is the tracked lifecycle record for one unit of agent work.
 type Job struct {
 	ID           string
@@ -202,6 +218,9 @@ type Orchestrator struct {
 	completions map[string]chan error // jobID -> runtime callback completion signal (docs/adr/0024)
 	closed      bool
 
+	ticketMu sync.Mutex
+	tickets  map[string]pullTicket // ticket id -> pull-substrate redemption ticket (docs/adr/0029)
+
 	wg       sync.WaitGroup // dispatch workers draining the queue
 	awaiters sync.WaitGroup // in-flight launch/await goroutines (docs/adr/0024)
 }
@@ -221,6 +240,7 @@ func New(minter *mint.Minter, launcher Launcher, log *slog.Logger) *Orchestrator
 		jobs:        make(map[string]*Job),
 		inflight:    make(map[string]bool),
 		completions: make(map[string]chan error),
+		tickets:     make(map[string]pullTicket),
 	}
 	for i := 0; i < defaultWorkers; i++ {
 		o.wg.Add(1)
@@ -261,6 +281,108 @@ func (o *Orchestrator) Research(_ context.Context, ownerID, itemID string) error
 		return fmt.Errorf("orchestrator: research requires ownerID and itemID")
 	}
 	return o.enqueue(JobGitHubResearch, ownerID, itemID)
+}
+
+// pullTicket is a single-use, short-lived capability a pull substrate's runtime
+// redeems for its job token (docs/adr/0029). It records exactly what the mint
+// needs — the job it is bound to, the type that selects the policy, and the
+// acting user — so the redeemed token is identical to the one dispatch would have
+// pushed (same job id, so the completion callback still correlates). It is
+// consumed on redemption and rejected past expiry.
+type pullTicket struct {
+	jobID      string
+	jobType    JobType
+	actingUser string
+	expiresAt  time.Time
+}
+
+// ticketTTL bounds how long a redemption ticket is valid. It need only cover the
+// gap between dispatch and the runtime redeeming — seconds for a warm durable
+// agent — so it is short; with single-use consumption this keeps a ticket's
+// at-rest exposure in a substrate's task history minimal (docs/adr/0029).
+const ticketTTL = 5 * time.Minute
+
+// dispatchCredential returns what the launcher hands its runtime. A pull
+// substrate (docs/adr/0029) gets a single-use ticket; every other substrate gets
+// the job token itself, minted at spawn (docs/adr/0002).
+func (o *Orchestrator) dispatchCredential(spec JobSpec, pol policyEntry) (string, error) {
+	if pl, ok := o.launcher.(PullTokenLauncher); ok && pl.PullsToken() {
+		return o.issueTicket(spec)
+	}
+	return o.minter.Mint(mint.Claims{
+		Subject:      "runtime-" + spec.JobID,
+		ActingUserID: spec.ActingUserID,
+		Scopes:       pol.scopes,
+		JobID:        spec.JobID,
+		Provider:     pol.provider,
+	})
+}
+
+// issueTicket mints a single-use redemption ticket bound to spec's job, for a
+// pull substrate whose runtime will exchange it for the job token (docs/adr/0029).
+func (o *Orchestrator) issueTicket(spec JobSpec) (string, error) {
+	id, err := newTicketID()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	o.ticketMu.Lock()
+	// Drop expired tickets opportunistically so an unredeemed one (a failed
+	// dispatch) cannot accumulate; the live set is only ever the in-flight jobs.
+	for k, t := range o.tickets {
+		if now.After(t.expiresAt) {
+			delete(o.tickets, k)
+		}
+	}
+	o.tickets[id] = pullTicket{jobID: spec.JobID, jobType: spec.Type, actingUser: spec.ActingUserID, expiresAt: now.Add(ticketTTL)}
+	o.ticketMu.Unlock()
+	return id, nil
+}
+
+// RedeemTicket exchanges a single-use ticket for the job token it was issued for
+// (docs/adr/0029). It consumes the ticket — a second presentation fails — and
+// mints a token whose job id matches the dispatched job, so the runtime's
+// completion callback still correlates. The ticket is itself the authorization
+// (the orchestrator issues exactly one per dispatched job), so possession is
+// sufficient; the web tier's POST /agent/token is the only caller.
+func (o *Orchestrator) RedeemTicket(ticketID string) (string, time.Duration, error) {
+	o.ticketMu.Lock()
+	t, ok := o.tickets[ticketID]
+	if ok {
+		delete(o.tickets, ticketID) // single-use: consume on redemption
+	}
+	o.ticketMu.Unlock()
+	if !ok {
+		return "", 0, fmt.Errorf("orchestrator: unknown or spent ticket")
+	}
+	if time.Now().After(t.expiresAt) {
+		return "", 0, fmt.Errorf("orchestrator: ticket expired")
+	}
+	pol, ok := policies[t.jobType]
+	if !ok {
+		return "", 0, fmt.Errorf("orchestrator: unknown job type %q", t.jobType)
+	}
+	tok, err := o.minter.Mint(mint.Claims{
+		Subject:      "runtime-" + t.jobID,
+		ActingUserID: t.actingUser,
+		Scopes:       pol.scopes,
+		JobID:        t.jobID,
+		Provider:     pol.provider,
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	return tok, o.minter.TTL(), nil
+}
+
+// newTicketID returns a high-entropy, URL-safe ticket identifier. A ticket is a
+// bearer capability, so it must be unguessable: 256 bits from crypto/rand.
+func newTicketID() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("orchestrator: ticket id: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // MintJobToken issues a job-scoped token for an authenticated control-plane
@@ -362,16 +484,13 @@ func (o *Orchestrator) run(id string) {
 	}
 	o.mu.Unlock()
 
-	// Authorization minted at spawn: runtime-type policy ∩ user consent. The
-	// token's subject is the ephemeral runtime, so writes trace runtime → job →
-	// user (docs/adr/0002).
-	token, err := o.minter.Mint(mint.Claims{
-		Subject:      "runtime-" + spec.JobID,
-		ActingUserID: spec.ActingUserID,
-		Scopes:       pol.scopes,
-		JobID:        spec.JobID,
-		Provider:     pol.provider,
-	})
+	// The credential handed to the launcher. A push substrate receives the job
+	// token, minted at spawn (docs/adr/0002); a pull substrate receives a
+	// single-use redemption ticket its runtime exchanges for the token
+	// (docs/adr/0029), so the token never rides the substrate's persisted metadata.
+	// Either way the token's subject is the ephemeral runtime, so writes trace
+	// runtime → job → user.
+	cred, err := o.dispatchCredential(spec, pol)
 	if err != nil {
 		o.finish(id, key, Handle{}, err)
 		return
@@ -385,7 +504,7 @@ func (o *Orchestrator) run(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), o.deadlineFor(spec.Type))
 
 	if al, ok := o.launcher.(AsyncLauncher); ok {
-		handle, derr := o.safeDispatch(al, ctx, spec, token)
+		handle, derr := o.safeDispatch(al, ctx, spec, cred)
 		if derr != nil {
 			cancel()
 			o.finish(id, key, handle, derr)
@@ -418,7 +537,7 @@ func (o *Orchestrator) run(id string) {
 	go func() {
 		defer o.awaiters.Done()
 		defer cancel()
-		handle, lerr := o.safeLaunch(ctx, spec, token)
+		handle, lerr := o.safeLaunch(ctx, spec, cred)
 		o.finish(id, key, handle, lerr)
 	}()
 }

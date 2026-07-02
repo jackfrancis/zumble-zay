@@ -24,6 +24,13 @@ const (
 	// it out-of-band (the Kubernetes launcher via a Secret reference), and only
 	// ParamsFromEnv reads it back. In-process the token rides RunParams directly.
 	EnvAIToken = "ZZ_AI_TOKEN"
+	// EnvTicket carries a single-use redemption ticket for the token-exchange
+	// pull-path (docs/adr/0029). Like EnvAIToken it sits outside the Env /
+	// ParamsFromEnv pair: a pull substrate injects it in place of EnvToken so the
+	// live job token never rides the substrate's persisted metadata, and the
+	// runtime redeems it (POST /agent/token) for the token before decoding params.
+	// A push substrate never sets it.
+	EnvTicket = "ZZ_JOB_TICKET"
 )
 
 // Env encodes the serializable parameters of a runtime invocation into the
