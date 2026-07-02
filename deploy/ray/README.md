@@ -65,14 +65,23 @@ and observational*, not throughput.
 
 ### Launcher comparison
 
-| | k8s-job | k8s-pod | agent-sandbox | **ray** |
-|---|---|---|---|---|
-| Work runs in | fresh pod | fresh pod | sandbox pod | **warm standing cluster** |
-| Cold start per job | yes | yes | yes | **no** |
-| K8s objects / invocation | 1 | 1 | 1+ | 1 (RayJob) |
-| Intra-job fan-out | ✗ | ✗ | ✗ | **✓ actors across nodes** |
-| Built-in distributed observability | logs only | logs only | logs only | **✓ dashboard + per-actor metrics** |
-| Scaling ceiling | K8s scheduler / etcd | same | same | **Ray (autoscaler, GPU, Serve)** |
+| | k8s-job | k8s-pod | agent-sandbox | kagent | **ray** |
+|---|---|---|---|---|---|
+| Work runs in | fresh pod | fresh pod | sandbox pod | **standing agent Deployment** | **warm standing cluster** |
+| Cold start per job | yes | yes | yes | **no** | **no** |
+| K8s objects / invocation | 1 | 1 | 1+ | **0** (A2A dispatch) | 1 (RayJob) |
+| Intra-job fan-out | ✗ | ✗ | ✗ | ✗ | **✓ actors across nodes** |
+| Built-in distributed observability | logs only | logs only | logs only | task history (controller) | **✓ dashboard + per-actor metrics** |
+| Scaling ceiling | K8s scheduler / etcd | same | same | K8s Deployment (HPA) | **Ray (autoscaler, GPU, Serve)** |
+
+**kagent** (ADR 0029) is the other *durable-runtime* substrate, and it's the honest
+foil to ray on churn: it hosts a **long-lived** agent Deployment and the launcher
+**dispatches to it over A2A** rather than creating a workload — so it mints **zero
+K8s objects per invocation** (ZZ is a client of the kagent control plane, needs no
+pod-create RBAC). That's the pod/etcd-churn win ray does *not* have today. What
+kagent lacks is Ray's intra-job compute: it runs the same single-process `agent.Run`
+(goroutine concurrency), with no actor fan-out across nodes and no distributed
+per-actor metrics — just the controller's durable task history.
 
 **Ray's genuine wins today** (even while I/O-bound):
 - **Warm execution** — no per-job pod cold-start; work lands on an already-running cluster.
@@ -82,8 +91,8 @@ and observational*, not throughput.
   launchers give you logs and nothing else.
 
 **What Ray does *not* change today:** pod/etcd churn is the same (still one RayJob
-+ submitter pod per invocation), and throughput is unchanged (bound by the remote
-model API).
++ submitter pod per invocation — kagent actually does better here), and throughput
+is unchanged (bound by the remote model API).
 
 ### When Ray genuinely wins — the future direction (ADR 0031)
 
