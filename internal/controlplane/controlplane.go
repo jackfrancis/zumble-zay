@@ -107,21 +107,32 @@ func (l *Local) RedeemTicket(_ context.Context, ticket string) (string, int, err
 }
 
 // HTTP is the remote control client: it calls the orchestrator's control API. It
-// presents the shared control token as a bearer on every request, because the
-// API triggers privileged spawns even though it is cluster-internal.
+// presents a bearer on every request, because the API triggers privileged spawns
+// even though it is cluster-internal. The bearer is read from a token source per
+// request so a rotating credential (a projected ServiceAccount token) stays
+// current (docs/adr/0031).
 type HTTP struct {
 	baseURL string
 	client  *http.Client
-	token   string
+	token   func() (string, error)
 }
 
-// NewHTTP builds a remote control client targeting the orchestrator at baseURL.
-// A nil client gets http.DefaultClient.
+// NewHTTP builds a remote control client targeting the orchestrator at baseURL
+// with a static bearer token. A nil client gets http.DefaultClient.
 func NewHTTP(baseURL string, client *http.Client, token []byte) *HTTP {
+	static := string(token)
+	return NewHTTPWithTokenSource(baseURL, client, func() (string, error) { return static, nil })
+}
+
+// NewHTTPWithTokenSource builds a remote control client that reads its bearer from
+// source on every request. Use it for a rotating credential — a projected
+// ServiceAccount token that kubelet refreshes in place (docs/adr/0031) — so a
+// long-lived web tier always presents a currently-valid token.
+func NewHTTPWithTokenSource(baseURL string, client *http.Client, source func() (string, error)) *HTTP {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &HTTP{baseURL: strings.TrimRight(baseURL, "/"), client: client, token: string(token)}
+	return &HTTP{baseURL: strings.TrimRight(baseURL, "/"), client: client, token: source}
 }
 
 // EnsureBackfill triggers a worklist backfill for ownerID.
@@ -207,8 +218,14 @@ func (h *HTTP) do(ctx context.Context, method, path string, body any) (*http.Res
 	if err != nil {
 		return nil, err
 	}
-	if h.token != "" {
-		req.Header.Set("Authorization", "Bearer "+h.token)
+	if h.token != nil {
+		tok, err := h.token()
+		if err != nil {
+			return nil, fmt.Errorf("controlplane: read control token: %w", err)
+		}
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -217,29 +234,41 @@ func (h *HTTP) do(ctx context.Context, method, path string, body any) (*http.Res
 }
 
 // Handler serves the orchestrator's control API. It authenticates every request
-// with a constant-time bearer check against the shared control token, then maps
-// it to the wrapped Controller. It registers its routes on a caller-supplied mux
-// so the orchestrator binary can add its own health endpoint alongside.
+// through a CallerAuthenticator — the shared control bearer by default, a
+// per-service caller identity in production (docs/adr/0031) — then maps it to the
+// wrapped Controller. It registers its routes on a caller-supplied mux so the
+// orchestrator binary can add its own health endpoint alongside.
 type Handler struct {
 	c      Controller
 	issuer TokenIssuer
 	caller CallerAuthenticator
-	token  []byte
 	log    *slog.Logger
 }
 
-// NewHandler builds the control API handler over c, authenticated by token.
+// NewHandler builds the control API handler over c. By default every route is
+// authenticated with the shared control bearer (token); WithCaller swaps in a
+// per-service caller identity (docs/adr/0031).
 func NewHandler(c Controller, token []byte, log *slog.Logger) *Handler {
-	return &Handler{c: c, token: token, log: log}
+	return &Handler{c: c, caller: NewBearerCallerAuthenticator(token), log: log}
 }
 
-// WithTokenExchange enables the token-exchange endpoint (docs/adr/0024): a
-// long-lived service runtime authenticates with caller and exchanges its
-// identity for a fresh job-scoped token from issuer. The endpoint is registered
-// only when both are set. Returns the handler for chaining.
-func (h *Handler) WithTokenExchange(issuer TokenIssuer, caller CallerAuthenticator) *Handler {
+// WithCaller overrides how every control request is authenticated. The default
+// (NewHandler) is the shared control bearer; production wires a per-service caller
+// identity — a projected ServiceAccount token validated by TokenReview, typically
+// chained with the bearer as a migration fallback (docs/adr/0031).
+func (h *Handler) WithCaller(caller CallerAuthenticator) *Handler {
+	if caller != nil {
+		h.caller = caller
+	}
+	return h
+}
+
+// WithTokenExchange enables the token-exchange endpoint (docs/adr/0024): a caller
+// exchanges its identity for a fresh job-scoped token from issuer. It is
+// registered only when issuer is set and is authenticated by the handler's caller
+// (WithCaller), the same as every other control route.
+func (h *Handler) WithTokenExchange(issuer TokenIssuer) *Handler {
 	h.issuer = issuer
-	h.caller = caller
 	return h
 }
 
@@ -251,10 +280,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /control/complete", h.auth(h.complete))
 	mux.HandleFunc("POST /control/redeem", h.auth(h.redeem))
 	mux.HandleFunc("GET /control/active", h.auth(h.active))
-	if h.issuer != nil && h.caller != nil {
-		// Token exchange authenticates the caller itself (RFC 8693-flavored), so it
-		// is not wrapped in the shared-bearer auth the trigger routes use.
-		mux.HandleFunc("POST /control/token", h.exchange)
+	if h.issuer != nil {
+		mux.HandleFunc("POST /control/token", h.auth(h.exchange))
 	}
 }
 
@@ -372,14 +399,11 @@ func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 // service runtime authenticates (via the CallerAuthenticator) and exchanges its
 // identity for a fresh job-scoped token, the pull complement to push-at-dispatch.
 func (h *Handler) exchange(w http.ResponseWriter, r *http.Request) {
-	caller, err := h.caller.Authenticate(r)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
+	// auth has already authenticated the caller and placed it on the context.
+	caller, _ := callerFrom(r.Context())
 	// A trusted control-plane caller may request a token for any acting user, as
-	// the orchestrator's own dispatch path does. A future per-service
-	// authenticator would set Trusted false and carry a constrained authority.
+	// the orchestrator's own dispatch path does. A future per-service authenticator
+	// would set Trusted false and carry a constrained authority.
 	if !caller.Trusted {
 		http.Error(w, "caller not permitted to request job tokens", http.StatusForbidden)
 		return
@@ -417,16 +441,18 @@ func (h *Handler) fail(w http.ResponseWriter, op string, err error) {
 	http.Error(w, "control request failed", http.StatusInternalServerError)
 }
 
-// auth wraps a handler with a constant-time bearer check. An empty configured
-// token rejects everything (fail closed): the control API must never run open.
+// auth authenticates a request through the handler's CallerAuthenticator and puts
+// the resulting Caller on the request context for the handler to read. A caller
+// that cannot be authenticated is rejected (fail closed): the control API must
+// never run open (docs/adr/0031).
 func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		presented := bearer(r)
-		if len(h.token) == 0 || subtle.ConstantTimeCompare([]byte(presented), h.token) != 1 {
+		caller, err := h.caller.Authenticate(r)
+		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, caller)))
 	}
 }
 
@@ -513,6 +539,36 @@ func (a bearerCaller) Authenticate(r *http.Request) (Caller, error) {
 }
 
 var errUnauthorizedCaller = errors.New("controlplane: unauthorized caller")
+
+// callerCtxKey carries the authenticated Caller from auth to the route handler.
+type callerCtxKey struct{}
+
+// callerFrom returns the Caller that auth placed on the context.
+func callerFrom(ctx context.Context) (Caller, bool) {
+	c, ok := ctx.Value(callerCtxKey{}).(Caller)
+	return c, ok
+}
+
+// NewChainCallerAuthenticator tries each authenticator in order and returns the
+// first success; if all fail it returns the last error. It layers a per-service
+// identity (TokenReview) over the shared-bearer fallback during migration
+// (docs/adr/0031).
+func NewChainCallerAuthenticator(authenticators ...CallerAuthenticator) CallerAuthenticator {
+	return chainCaller(authenticators)
+}
+
+type chainCaller []CallerAuthenticator
+
+func (cc chainCaller) Authenticate(r *http.Request) (Caller, error) {
+	err := error(errUnauthorizedCaller)
+	for _, a := range cc {
+		var caller Caller
+		if caller, err = a.Authenticate(r); err == nil {
+			return caller, nil
+		}
+	}
+	return Caller{}, err
+}
 
 type tokenRequest struct {
 	JobType    string `json:"job_type"`

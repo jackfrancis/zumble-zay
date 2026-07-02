@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackfrancis/zumble-zay/internal/agent"
 	"github.com/jackfrancis/zumble-zay/internal/config"
+	"github.com/jackfrancis/zumble-zay/internal/controlauth"
 	"github.com/jackfrancis/zumble-zay/internal/controlplane"
 	"github.com/jackfrancis/zumble-zay/internal/k8slauncher"
 	"github.com/jackfrancis/zumble-zay/internal/launcher"
@@ -70,12 +71,23 @@ func main() {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	// The control API: the web tier's trigger routes plus the token-exchange
-	// endpoint for long-lived service runtimes (docs/adr/0024). Both are gated by
-	// the shared control-plane bearer today; token exchange swaps in per-service
-	// identity via the CallerAuthenticator seam.
-	controlplane.NewHandler(orch, cfg.ControlPlaneToken, log).
-		WithTokenExchange(orch, controlplane.NewBearerCallerAuthenticator(cfg.ControlPlaneToken)).
-		Register(mux)
+	// endpoint (docs/adr/0024). Every route is authenticated through the handler's
+	// CallerAuthenticator. With CONTROL_PLANE_AUDIENCE set, that is per-service
+	// Kubernetes workload identity — a projected ServiceAccount token validated by
+	// TokenReview — chained over the shared bearer as a migration fallback
+	// (docs/adr/0031); otherwise it is the shared bearer alone.
+	control := controlplane.NewHandler(orch, cfg.ControlPlaneToken, log)
+	if cfg.ControlPlaneAudience != "" {
+		tr, err := controlauth.Build(cfg.ControlPlaneAudience, cfg.ControlPlaneCallers, log)
+		if err != nil {
+			log.Error("control-plane caller identity setup failed", "err", err)
+			os.Exit(1)
+		}
+		control = control.WithCaller(controlplane.NewChainCallerAuthenticator(
+			tr, controlplane.NewBearerCallerAuthenticator(cfg.ControlPlaneToken)))
+		log.Info("control API: per-service caller identity enabled", "audience", cfg.ControlPlaneAudience)
+	}
+	control.WithTokenExchange(orch).Register(mux)
 
 	srv := &http.Server{
 		Addr:              cfg.ControlPlaneAddr,

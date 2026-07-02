@@ -90,8 +90,12 @@ func loopbackBaseURL(addr string) string {
 // the co-located orchestrator (a no-op for the remote client).
 func buildControlClient(cfg *config.Config, log *slog.Logger) (controlplane.Client, func(), error) {
 	if cfg.ControlPlaneURL != "" {
-		log.Info("using remote control plane", "url", cfg.ControlPlaneURL)
 		httpClient := &http.Client{Timeout: 10 * time.Second}
+		if cfg.ControlPlaneTokenPath != "" {
+			log.Info("using remote control plane with projected ServiceAccount identity", "url", cfg.ControlPlaneURL)
+			return controlplane.NewHTTPWithTokenSource(cfg.ControlPlaneURL, httpClient, fileTokenSource(cfg.ControlPlaneTokenPath)), func() {}, nil
+		}
+		log.Info("using remote control plane", "url", cfg.ControlPlaneURL)
 		return controlplane.NewHTTP(cfg.ControlPlaneURL, httpClient, cfg.ControlPlaneToken), func() {}, nil
 	}
 	if len(cfg.MintPrivateKey) == 0 {
@@ -103,4 +107,17 @@ func buildControlClient(cfg *config.Config, log *slog.Logger) (controlplane.Clie
 		WithAI(cfg.AI.Endpoint, cfg.AI.Model, cfg.AI.Token)
 	orch := orchestrator.New(minter, launcher, log)
 	return controlplane.NewLocal(orch), orch.Stop, nil
+}
+
+// fileTokenSource reads a bearer token from path on each call. A projected
+// ServiceAccount token is refreshed in place by kubelet, so re-reading keeps the
+// control client's credential current (docs/adr/0031).
+func fileTokenSource(path string) func() (string, error) {
+	return func() (string, error) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read control token %s: %w", path, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
 }

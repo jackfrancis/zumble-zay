@@ -56,6 +56,19 @@ type Config struct {
 	// orchestrator's control API and the orchestrator checks. The control API is
 	// cluster-internal, but it triggers privileged spawns, so it is authenticated.
 	ControlPlaneToken []byte
+	// ControlPlaneAudience, when set, makes the orchestrator authenticate control
+	// callers by their Kubernetes workload identity (a projected ServiceAccount
+	// token validated by TokenReview for this audience) in addition to the shared
+	// bearer (docs/adr/0031). Empty keeps shared-bearer-only behavior.
+	ControlPlaneAudience string
+	// ControlPlaneCallers is the allowlist of ServiceAccount usernames permitted to
+	// call the control API when ControlPlaneAudience is set, e.g.
+	// "system:serviceaccount:zumble-zay:zumble-zay" (docs/adr/0031).
+	ControlPlaneCallers []string
+	// ControlPlaneTokenPath, when set, makes the web tier present the projected
+	// ServiceAccount token at this path (re-read per request as it rotates) as its
+	// control-API bearer instead of the static ControlPlaneToken (docs/adr/0031).
+	ControlPlaneTokenPath string
 }
 
 // AIConfig configures the AxisRanker's chat model. The endpoint speaks the
@@ -156,11 +169,14 @@ func Load() (*Config, error) {
 			TokenSecretName: lookupEnvOr("AI_TOKEN_SECRET_NAME", "zumble-zay-secrets"),
 			TokenSecretKey:  getEnv("AI_TOKEN_SECRET_KEY", "AI_TOKEN"),
 		},
-		MintPrivateKey:    mintPriv,
-		MintPublicKey:     mintPub,
-		ControlPlaneURL:   strings.TrimRight(getEnv("CONTROL_PLANE_URL", ""), "/"),
-		ControlPlaneAddr:  getEnv("CONTROL_PLANE_ADDR", ":8090"),
-		ControlPlaneToken: []byte(os.Getenv("CONTROL_PLANE_TOKEN")),
+		MintPrivateKey:        mintPriv,
+		MintPublicKey:         mintPub,
+		ControlPlaneURL:       strings.TrimRight(getEnv("CONTROL_PLANE_URL", ""), "/"),
+		ControlPlaneAddr:      getEnv("CONTROL_PLANE_ADDR", ":8090"),
+		ControlPlaneToken:     []byte(os.Getenv("CONTROL_PLANE_TOKEN")),
+		ControlPlaneAudience:  os.Getenv("CONTROL_PLANE_AUDIENCE"),
+		ControlPlaneCallers:   splitAndTrim(os.Getenv("CONTROL_PLANE_CALLERS")),
+		ControlPlaneTokenPath: os.Getenv("CONTROL_PLANE_TOKEN_PATH"),
 	}
 
 	return cfg, nil

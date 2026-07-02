@@ -97,8 +97,12 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   to the orchestrator ServiceAccount only, never the web tier's. The pull
   token-exchange endpoint (`POST /control/token`, ADR 0024) issues only
   policy-scoped, single-user, short-TTL job tokens, and authenticates the caller
-  behind the `CallerAuthenticator` seam (shared bearer today; per-service
-  platform OIDC is the hardening). A durable runtime that must not persist a live
+  behind the `CallerAuthenticator` seam — now per-service Kubernetes workload
+  identity across **all** control routes (ADR 0031): the web tier presents a
+  projected ServiceAccount token bound to the orchestrator's audience, the
+  orchestrator validates it via TokenReview and checks the caller SA against an
+  allowlist, chained over the shared bearer as a fail-safe fallback (kept for
+  co-located and test runs). A durable runtime that must not persist a live
   token (kagent) instead receives a **single-use redemption ticket** and exchanges
   it for the token at `POST /agent/token` → `POST /control/redeem` (ADR 0030): the
   ticket is job-bound, short-TTL, consumed on first use, and is itself the
@@ -162,7 +166,7 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   stays `k8s-job`). Reserve the next free ADR number and add its README row in
   your first PR so two efforts don't claim the same one — reserved so far:
   **0027** opensandbox, **0028** ray/kuberay, **0029** kagent, **0030** job-token
-  pull-path.
+  pull-path, **0031** control-plane caller identity.
 
 ## Build / dev / test
 
@@ -255,9 +259,11 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    archetype on the standing agent; converse has its own 15-min budget. Select with
    `LAUNCHER=kagent`. The token-exchange pull-path is DONE (ADR 0030 — single-use ticket +
    `POST /agent/token` → `POST /control/redeem`, an in-memory ticket store minting
-   the job token — with the dispatched job's id — on redemption); remaining is
-   transport + caller-identity hardening (mTLS/`NetworkPolicy` on the `/agent/*`
-   plane and per-service OIDC, ADR 0024) and `KueueLauncher` (admission/quota).
+   the job token — with the dispatched job's id — on redemption); the web→orchestrator
+   caller-identity hardening is DONE (ADR 0031 — per-service Kubernetes workload
+   identity via TokenReview across all control routes, chained over the shared
+   bearer); remaining is transport (mTLS/`NetworkPolicy`) plus per-service identity
+   on the runtime→web `/agent/*` plane, and `KueueLauncher` (admission/quota).
 7. **Prompt & context tuning is now the primary correctness lever (ADR 0015).**
    The LLM is authoritative for the four axes, so ranking quality is steered in
    `internal/llm/prompt.go` — sharper axis definitions, the user's priorities and

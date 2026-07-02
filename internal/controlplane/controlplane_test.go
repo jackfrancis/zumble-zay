@@ -237,7 +237,7 @@ func TestTokenExchangeIssuesScopedToken(t *testing.T) {
 	fc := &fakeController{active: map[string]bool{}}
 	issuer := &fakeIssuer{}
 	h := controlplane.NewHandler(fc, []byte(ctrlToken), nil).
-		WithTokenExchange(issuer, controlplane.NewBearerCallerAuthenticator([]byte(ctrlToken)))
+		WithTokenExchange(issuer)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	ts := httptest.NewServer(mux)

@@ -34,3 +34,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0027](0027-opensandbox-substrate.md) | OpenSandbox as a remote-control-plane substrate (hand-rolled HTTP, detached completion) | Accepted |
 | [0029](0029-kagent-durable-runtime-substrate.md) | kagent as a durable BYO-A2A runtime substrate (per-job params in message metadata, detached callback completion) | Accepted |
 | [0030](0030-job-token-pull-path.md) | Job-token pull-path: single-use ticket redemption keeps the live token out of a durable runtime's persisted task history | Accepted |
+| [0031](0031-control-plane-caller-identity.md) | Control-plane per-service caller identity: the orchestrator validates the web tier's projected ServiceAccount token via TokenReview | Accepted |
