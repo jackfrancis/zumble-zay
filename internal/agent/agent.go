@@ -537,6 +537,9 @@ func formatDiscussion(d github.Discussion) string {
 			fmt.Fprintf(&b, "- %s\n", f)
 		}
 	}
+	if d.HeadSHA != "" {
+		fmt.Fprintf(&b, "\nHead commit: %s\n", d.HeadSHA)
+	}
 	if len(d.Reviews) > 0 {
 		fmt.Fprintf(&b, "\nReviews (%d most recent):\n", len(d.Reviews))
 		for _, r := range d.Reviews {

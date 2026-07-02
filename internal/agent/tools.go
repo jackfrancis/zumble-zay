@@ -66,7 +66,7 @@ func (t *githubToolBox) Definitions() []worklist.ToolDef {
 		},
 		{
 			Name:        "github_get_pull_request",
-			Description: "Get a pull request's current state: open or closed, merged or not (and when), title, and base/head branches.",
+			Description: "Get a pull request's current state: open or closed, merged or not (and when), title, base/head branches, and the head commit SHA — read its changed files at that SHA (a PR branch may live on a fork and not resolve in the base repo).",
 			Parameters:  schemaGetPR,
 		},
 		{

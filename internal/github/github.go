@@ -404,6 +404,7 @@ type Discussion struct {
 	Reviews        []Review  // PR review submissions: state + summary body (PRs only)
 	ReviewComments []Comment // inline review comments on the diff (PRs only)
 	ChangedFiles   []string
+	HeadSHA        string // PR head commit (PRs only): the ref to read changed files at
 }
 
 // Comment is one comment in an item's discussion, or an inline review comment.
@@ -477,6 +478,22 @@ func (c *Client) Discussion(ctx context.Context, token, repo string, number int,
 
 	// Changed file paths for PRs are best-effort and low-risk (paths, not patch).
 	if isPR {
+		// The PR head commit, so the assistant reads changed files at the exact ref
+		// the PR proposes rather than guessing a branch name. Best-effort but
+		// important for fork PRs: the head *branch* lives on the contributor's fork
+		// and does not resolve in this repo, whereas GitHub exposes the head *commit*
+		// in the base repo — so the SHA is the reliable ref.
+		if body, err := c.get(ctx, token, fmt.Sprintf("/repos/%s/pulls/%d", repo, number)); err == nil {
+			var pr struct {
+				Head struct {
+					SHA string `json:"sha"`
+				} `json:"head"`
+			}
+			if err := json.Unmarshal(body, &pr); err == nil {
+				d.HeadSHA = pr.Head.SHA
+			}
+		}
+
 		// PR review submissions: state + summary body. Best-effort.
 		if body, err := c.get(ctx, token, fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=100", repo, number)); err == nil {
 			var raw []struct {
@@ -673,6 +690,7 @@ func (c *Client) PullRequestStatus(ctx context.Context, token, repo string, numb
 		} `json:"base"`
 		Head struct {
 			Ref string `json:"ref"`
+			SHA string `json:"sha"`
 		} `json:"head"`
 		HTMLURL string `json:"html_url"`
 	}
@@ -686,8 +704,12 @@ func (c *Client) PullRequestStatus(ctx context.Context, token, repo string, numb
 			merged += " at " + pr.MergedAt.UTC().Format(time.RFC3339)
 		}
 	}
-	return fmt.Sprintf("PR %s#%d %q: state=%s, %s, base=%s, head=%s\n%s",
-		repo, pr.Number, pr.Title, pr.State, merged, pr.Base.Ref, pr.Head.Ref, pr.HTMLURL), nil
+	summary := fmt.Sprintf("PR %s#%d %q: state=%s, %s, base=%s, head=%s",
+		repo, pr.Number, pr.Title, pr.State, merged, pr.Base.Ref, pr.Head.Ref)
+	if pr.Head.SHA != "" {
+		summary += ", head commit=" + pr.Head.SHA
+	}
+	return summary + "\n" + pr.HTMLURL, nil
 }
 
 // IssueStatus returns an issue's (or PR's) current state as a compact summary.

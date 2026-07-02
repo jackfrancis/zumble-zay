@@ -103,7 +103,7 @@ func TestPullRequestStatusSummarizesMerge(t *testing.T) {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"number":9484,"state":"closed","merged":true,"merged_at":"2026-05-01T00:00:00Z","title":"bump grpc","base":{"ref":"master"},"head":{"ref":"fix"},"html_url":"https://github.com/kubernetes/autoscaler/pull/9484"}`))
+		_, _ = w.Write([]byte(`{"number":9484,"state":"closed","merged":true,"merged_at":"2026-05-01T00:00:00Z","title":"bump grpc","base":{"ref":"master"},"head":{"ref":"fix","sha":"deadbeef"},"html_url":"https://github.com/kubernetes/autoscaler/pull/9484"}`))
 	}))
 	defer srv.Close()
 
@@ -112,7 +112,7 @@ func TestPullRequestStatusSummarizesMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PullRequestStatus: %v", err)
 	}
-	if !strings.Contains(got, "merged") || !strings.Contains(got, "#9484") || !strings.Contains(got, "base=master") {
+	if !strings.Contains(got, "merged") || !strings.Contains(got, "#9484") || !strings.Contains(got, "base=master") || !strings.Contains(got, "deadbeef") {
 		t.Fatalf("summary missing fields: %q", got)
 	}
 }
@@ -145,6 +145,8 @@ func TestDiscussionIncludesReviewsAndComments(t *testing.T) {
 			_, _ = w.Write([]byte(`{"body":"the description"}`))
 		case "/repos/o/r/issues/5/comments":
 			_, _ = w.Write([]byte(`[{"body":"general thread","user":{"login":"alice"},"created_at":"2026-06-20T10:00:00Z"}]`))
+		case "/repos/o/r/pulls/5":
+			_, _ = w.Write([]byte(`{"head":{"sha":"abc123"}}`))
 		case "/repos/o/r/pulls/5/reviews":
 			// One substantive review and one empty "commented" container.
 			_, _ = w.Write([]byte(`[
@@ -169,6 +171,9 @@ func TestDiscussionIncludesReviewsAndComments(t *testing.T) {
 	}
 	if d.Body != "the description" {
 		t.Errorf("body = %q", d.Body)
+	}
+	if d.HeadSHA != "abc123" {
+		t.Errorf("head sha = %q, want abc123", d.HeadSHA)
 	}
 	if len(d.Comments) != 1 || d.Comments[0].Author != "alice" {
 		t.Errorf("general comments = %+v", d.Comments)
