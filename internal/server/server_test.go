@@ -20,6 +20,7 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/mint"
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 	"github.com/jackfrancis/zumble-zay/internal/principal"
+	"github.com/jackfrancis/zumble-zay/internal/session"
 	"github.com/jackfrancis/zumble-zay/internal/vault"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
@@ -104,7 +105,7 @@ func TestAgenticBackfillEndToEnd(t *testing.T) {
 
 	cp, stopOrch := newLocalControl(secret, launcher, log)
 	defer stopOrch()
-	handler, cleanup := newWithDeps(cfg, log, cp, vlt, store)
+	handler, sessions, cleanup := newWithDeps(cfg, log, cp, vlt, store)
 	defer cleanup()
 
 	ts := httptest.NewUnstartedServer(handler)
@@ -113,21 +114,12 @@ func TestAgenticBackfillEndToEnd(t *testing.T) {
 	ts.Start()
 	defer ts.Close()
 
-	// A workload bearer scoped to the user, used only to trigger the read path.
-	m := mint.NewMinterFromSeed(secret, time.Minute)
-	bearer, err := m.Mint(mint.Claims{
-		Subject:      "test-trigger",
-		ActingUserID: user,
-		Scopes:       []principal.Scope{principal.ScopeSignalsRead},
-		JobID:        "trigger",
-		Provider:     "github",
-	})
-	if err != nil {
-		t.Fatalf("mint trigger token: %v", err)
-	}
+	// The landing page is the user plane: authenticate as the interactive user
+	// whose worklist the agent backfills.
+	cookies := loginCookies(t, sessions, user)
 
 	// First read: empty store -> processing, and a backfill is kicked off.
-	first := getWorklist(t, ts.URL, bearer)
+	first := getWorklist(t, ts.URL, cookies)
 	if first.Status != "processing" {
 		t.Fatalf("expected status processing, got %q", first.Status)
 	}
@@ -139,7 +131,7 @@ func TestAgenticBackfillEndToEnd(t *testing.T) {
 	var ready worklistResp
 	deadline := time.After(5 * time.Second)
 	for {
-		ready = getWorklist(t, ts.URL, bearer)
+		ready = getWorklist(t, ts.URL, cookies)
 		if ready.Status == "ready" && len(ready.Items) == 2 {
 			break
 		}
@@ -166,13 +158,25 @@ func TestAgenticBackfillEndToEnd(t *testing.T) {
 	}
 }
 
-func getWorklist(t *testing.T, base, bearer string) worklistResp {
+// loginCookies mints an interactive session for userID against the handler's own
+// session manager (sessions are server-side, so the cookie must originate from
+// that manager) and returns its cookies for the user /api/* plane.
+func loginCookies(t *testing.T, mgr *session.Manager, userID string) []*http.Cookie {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mgr.Authenticate(rec, httptest.NewRequest(http.MethodGet, "/", nil), &session.User{ID: userID, Provider: "github"})
+	return rec.Result().Cookies()
+}
+
+func getWorklist(t *testing.T, base string, cookies []*http.Cookie) worklistResp {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, base+"/api/worklist", nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("worklist GET: %v", err)
@@ -262,7 +266,7 @@ func TestConverseTurnEndToEnd(t *testing.T) {
 
 	cp, stopOrch := newLocalControl(secret, launcher, log)
 	defer stopOrch()
-	handler, cleanup := newWithDeps(cfg, log, cp, vlt, store)
+	handler, sessions, cleanup := newWithDeps(cfg, log, cp, vlt, store)
 	defer cleanup()
 
 	ts := httptest.NewUnstartedServer(handler)
@@ -271,22 +275,16 @@ func TestConverseTurnEndToEnd(t *testing.T) {
 	ts.Start()
 	defer ts.Close()
 
-	m := mint.NewMinterFromSeed(secret, time.Minute)
-	bearer, err := m.Mint(mint.Claims{
-		Subject: "test-trigger", ActingUserID: user,
-		Scopes: []principal.Scope{principal.ScopeSignalsRead}, JobID: "trigger", Provider: "github",
-	})
-	if err != nil {
-		t.Fatalf("mint trigger token: %v", err)
-	}
+	// Posting a question and reading the thread are user-plane actions.
+	cookies := loginCookies(t, sessions, user)
 
-	postThread(t, ts.URL, bearer, itemID, "help me triage this")
+	postThread(t, ts.URL, cookies, itemID, "help me triage this")
 
 	// Poll until the assistant's reply is written back to the thread.
 	var reply string
 	deadline := time.After(5 * time.Second)
 	for {
-		msgs := getThread(t, ts.URL, bearer, itemID)
+		msgs := getThread(t, ts.URL, cookies, itemID)
 		if len(msgs) >= 2 && msgs[len(msgs)-1].Role == worklist.RoleAgent {
 			reply = msgs[len(msgs)-1].Content
 			break
@@ -312,14 +310,16 @@ func TestConverseTurnEndToEnd(t *testing.T) {
 	}
 }
 
-func postThread(t *testing.T, base, bearer, id, content string) {
+func postThread(t *testing.T, base string, cookies []*http.Cookie, id, content string) {
 	t.Helper()
 	body := strings.NewReader(`{"content":"` + content + `"}`)
 	req, err := http.NewRequest(http.MethodPost, base+"/api/thread?id="+url.QueryEscape(id), body)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -332,13 +332,15 @@ func postThread(t *testing.T, base, bearer, id, content string) {
 	}
 }
 
-func getThread(t *testing.T, base, bearer, id string) []worklist.Message {
+func getThread(t *testing.T, base string, cookies []*http.Cookie, id string) []worklist.Message {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, base+"/api/thread?id="+url.QueryEscape(id), nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+bearer)
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("thread GET: %v", err)
@@ -391,7 +393,7 @@ func TestResearchAgentReweightsItem(t *testing.T) {
 
 	cp, stopOrch := newLocalControl(secret, nil, log)
 	defer stopOrch()
-	handler, cleanup := newWithDeps(cfg, log, cp, vlt, store)
+	handler, _, cleanup := newWithDeps(cfg, log, cp, vlt, store)
 	defer cleanup()
 	ts := httptest.NewServer(handler)
 	defer ts.Close()

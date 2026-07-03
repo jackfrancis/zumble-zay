@@ -126,6 +126,39 @@ func TestBearerTokenPath(t *testing.T) {
 	})
 }
 
+func TestRequireAuthRejectsWorkloadToken(t *testing.T) {
+	mgr := session.NewManager([]byte("test-secret-至少-32-bytes-长度需要满足"), false)
+	workload := &principal.Principal{
+		Kind:         principal.KindWorkload,
+		Subject:      "runtime:abc",
+		ActingUserID: "github:42",
+		Scopes:       []principal.Scope{principal.ScopeSignalsRead},
+	}
+	a := New(mgr, stubValidator{token: "good-token", p: workload})
+
+	// A valid agent token must not authenticate on the interactive /api/* plane.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	a.RequireAuth(okHandler()).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("workload token must be rejected on the user plane; got %d", rec.Code)
+	}
+}
+
+func TestRequireScopeRejectsInteractiveSession(t *testing.T) {
+	mgr := session.NewManager([]byte("test-secret-至少-32-bytes-长度需要满足"), false)
+	a := New(mgr, nil)
+
+	// A browser session (KindUser, ScopeAll) must not reach the /agent/* plane.
+	req := newAuthenticatedRequest(t, mgr, &session.User{ID: "github:42"})
+	rec := httptest.NewRecorder()
+	a.RequireScope(principal.ScopeSignalsRead, okHandler()).ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("interactive session must be forbidden on the agent plane; got %d", rec.Code)
+	}
+}
+
 func TestHasScope(t *testing.T) {
 	user := &principal.Principal{Scopes: []principal.Scope{principal.ScopeAll}}
 	if !user.HasScope(principal.ScopeMetadataWrite) {

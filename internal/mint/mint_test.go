@@ -94,6 +94,28 @@ func TestValidateMapsToWorkloadPrincipal(t *testing.T) {
 	}
 }
 
+func TestMintStampsAgentAudience(t *testing.T) {
+	m := NewMinterFromSeed([]byte("test-secret-of-sufficient-length!"), time.Minute)
+	tok, _ := m.Mint(testClaims())
+	c, err := m.Verifier().Verify(tok)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if c.Audience != AudienceAgent {
+		t.Fatalf("Mint must stamp the agent audience, got %q", c.Audience)
+	}
+}
+
+func TestValidateRejectsForeignAudience(t *testing.T) {
+	m := NewMinterFromSeed([]byte("test-secret-of-sufficient-length!"), time.Minute)
+	c := testClaims()
+	c.Audience = "some-other-plane" // non-empty, so Mint keeps it rather than defaulting
+	tok, _ := m.Mint(c)
+	if _, err := m.Verifier().Validate(&http.Request{}, tok); err != ErrInvalidToken {
+		t.Fatalf("Validate must reject a token minted for a foreign audience, got %v", err)
+	}
+}
+
 func TestVerifyRejectsMalformed(t *testing.T) {
 	v := NewMinterFromSeed([]byte("test-secret-of-sufficient-length!"), time.Minute).Verifier()
 	for _, tok := range []string{"", "nodot", ".", "a.", ".b", "a.b.c"} {

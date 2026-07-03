@@ -70,12 +70,15 @@ func (a *Authenticator) resolve(r *http.Request) *principal.Principal {
 	return nil
 }
 
-// RequireAuth rejects unauthenticated requests and injects the principal into
-// the request context for downstream handlers.
+// RequireAuth gates the interactive user plane (the /api/* routes). It accepts
+// only an interactive user principal (an OAuth session); a workload/agent token
+// is rejected here so a runtime credential minted for the agent plane cannot be
+// replayed on the user API (docs/adr/0032). It injects the principal into the
+// request context for downstream handlers.
 func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := a.resolve(r)
-		if p == nil {
+		if p == nil || p.Kind != principal.KindUser {
 			writeJSONError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
@@ -83,16 +86,28 @@ func (a *Authenticator) RequireAuth(next http.Handler) http.Handler {
 	})
 }
 
-// RequireScope rejects requests whose principal lacks the given scope.
+// RequireScope gates the agent plane (the /agent/* routes). It accepts only a
+// workload principal — a runtime authenticated by an agent-audience job token
+// (docs/adr/0032) — that holds the given scope. An interactive session is
+// rejected: the agent plane is for runtimes, not browsers. It injects the
+// principal into the request context for downstream handlers.
 func (a *Authenticator) RequireScope(s principal.Scope, next http.Handler) http.Handler {
-	return a.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p, _ := principal.FromContext(r.Context())
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := a.resolve(r)
+		if p == nil {
+			writeJSONError(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+		if p.Kind != principal.KindWorkload {
+			writeJSONError(w, http.StatusForbidden, "this endpoint is for agent runtimes")
+			return
+		}
 		if !p.HasScope(s) {
 			writeJSONError(w, http.StatusForbidden, "insufficient scope")
 			return
 		}
-		next.ServeHTTP(w, r)
-	}))
+		next.ServeHTTP(w, r.WithContext(principal.NewContext(r.Context(), p)))
+	})
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"

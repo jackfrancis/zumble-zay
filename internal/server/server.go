@@ -27,12 +27,14 @@ import (
 // ZZ core imports no provider client (docs/adr/0006) and no launcher. The
 // returned cleanup stops the staleness reconciler.
 func New(cfg *config.Config, log *slog.Logger, cp controlplane.Client) (http.Handler, func()) {
-	return newWithDeps(cfg, log, cp, vault.NewMemoryVault(), worklist.NewMemoryStore())
+	h, _, stop := newWithDeps(cfg, log, cp, vault.NewMemoryVault(), worklist.NewMemoryStore())
+	return h, stop
 }
 
-// newWithDeps wires the handler over injected dependencies. Tests use it to
-// seed a vault credential and share the store; New supplies in-memory defaults.
-func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, vlt vault.Vault, store worklist.Store) (http.Handler, func()) {
+// newWithDeps wires the handler over injected dependencies. Tests use it to seed
+// a vault credential, share the store, and mint interactive sessions against the
+// returned manager; New supplies in-memory defaults.
+func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, vlt vault.Vault, store worklist.Store) (http.Handler, *session.Manager, func()) {
 	sessions := session.NewManager(cfg.SessionSecret, cfg.CookieSecure)
 	// The auth handler writes delegated provider tokens to the vault at login;
 	// the credential-vend endpoint reads them for agent runtimes.
@@ -175,7 +177,7 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, v
 	// co-located one in cmd/server, or a separate orchestrator process); the web
 	// tier owns only the reconciler it starts here.
 	cleanup := stopReconcile
-	return h, cleanup
+	return h, sessions, cleanup
 }
 
 // verifierKey returns the Ed25519 public key authn uses to validate job tokens.

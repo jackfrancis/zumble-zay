@@ -89,6 +89,15 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   to the cookie session.
 - Bearer/runtime tokens: `Authorization: Bearer` header only (never query
   string), TLS only, short TTL, revocable; store only hashes if opaque.
+- Job tokens are audience-bound to the agent plane (`aud=zumble-zay-agent`,
+  ADR 0032): the web tier's workload validator rejects any other audience, and the
+  two authentication planes are disjoint — `/api/*` (`RequireAuth`) accepts only an
+  interactive session, `/agent/*` (`RequireScope`) only a workload token — so a
+  runtime credential cannot be replayed on the user API, nor a browser session on
+  the agent sink. It is the token-level analog of the control plane's audience
+  binding (ADR 0031). Within-plane replay of a stolen agent token is left to
+  transport (mTLS) + short TTL, not a workload-identity scheme (which does not
+  generalize across the remote/durable substrates).
 - Job tokens are asymmetric (Ed25519, ADR 0023): the **orchestrator** is the
   sole issuer (private key); the web tier holds only the public key and
   **verifies** — it must never gain minting ability. The web→orchestrator control
@@ -166,7 +175,8 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   stays `k8s-job`). Reserve the next free ADR number and add its README row in
   your first PR so two efforts don't claim the same one — reserved so far:
   **0027** opensandbox, **0028** ray/kuberay, **0029** kagent, **0030** job-token
-  pull-path, **0031** control-plane caller identity.
+  pull-path, **0031** control-plane caller identity, **0032** agent-plane token
+  audience.
 
 ## Build / dev / test
 

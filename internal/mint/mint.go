@@ -37,6 +37,13 @@ var (
 // short; a compromised runtime holds a credential only this long.
 const defaultTTL = 10 * time.Minute
 
+// AudienceAgent is the audience stamped on every job token. It binds the token
+// to the runtime->web agent plane (the /agent/* routes) so a leaked runtime
+// credential cannot be replayed on the interactive /api/* plane (docs/adr/0032).
+// It is the token-level analog of the control plane's audience binding
+// (docs/adr/0031).
+const AudienceAgent = "zumble-zay-agent"
+
 // Claims are the self-describing contents of a job token. Mint sets IssuedAt
 // and ExpiresAt; the caller supplies the rest.
 type Claims struct {
@@ -45,6 +52,7 @@ type Claims struct {
 	Scopes       []principal.Scope `json:"scopes"`         // granted capabilities
 	JobID        string            `json:"jid"`            // 1:1 with the spawned job
 	Provider     string            `json:"prov,omitempty"` // provider the job targets
+	Audience     string            `json:"aud,omitempty"`  // plane the token is valid for (AudienceAgent)
 	IssuedAt     int64             `json:"iat"`
 	ExpiresAt    int64             `json:"exp"`
 }
@@ -84,6 +92,11 @@ func (m *Minter) Mint(c Claims) (string, error) {
 	now := m.now()
 	c.IssuedAt = now.Unix()
 	c.ExpiresAt = now.Add(m.ttl).Unix()
+	// Every job token is an agent-plane token; default the audience so callers
+	// need not set it (docs/adr/0032).
+	if c.Audience == "" {
+		c.Audience = AudienceAgent
+	}
 
 	payload, err := json.Marshal(c)
 	if err != nil {
@@ -155,6 +168,11 @@ func (v *Verifier) Validate(_ *http.Request, token string) (*principal.Principal
 	c, err := v.Verify(token)
 	if err != nil {
 		return nil, err
+	}
+	// The token must be audience-bound to the agent plane. A token minted for a
+	// different audience must not authenticate a runtime request (docs/adr/0032).
+	if c.Audience != AudienceAgent {
+		return nil, ErrInvalidToken
 	}
 	return &principal.Principal{
 		Kind:         principal.KindWorkload,
