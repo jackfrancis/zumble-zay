@@ -65,6 +65,13 @@ spec:
   containers:
   - name: runtime
     image: ${RUNTIME_A2A_IMAGE}
+    # atelet builds the actor's OCI Process.Args from this command ONLY — it does
+    # NOT fall back to the image ENTRYPOINT (cmd/atelet prepareOCIBundles feeds
+    # ctr.GetCommand() straight into the spec), so an unset command yields empty
+    # args and `runsc create` fails with exit status 128. Set it to the image's
+    # entrypoint binary (Dockerfile.runtime-a2a: /runtime-a2a); every ate demo
+    # (counter, sandbox, sleep) likewise sets an explicit command.
+    command: ["/runtime-a2a"]
     env:
     # The atenet-router forwards inbound traffic to the actor's port 80 (the only
     # inbound port it maps today), and the distroless runtime-a2a listens on $PORT
