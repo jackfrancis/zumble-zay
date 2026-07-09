@@ -1,0 +1,41 @@
+# Transport isolation for the control plane (docs/adr/0033). The orchestrator's
+# control API triggers privileged agent spawns and job-token minting. It is
+# already ClusterIP-only, authenticated per-service via TokenReview (docs/adr/0031),
+# and never Ingress-exposed — this NetworkPolicy adds the missing L3/L4 layer so a
+# compromised pod cannot even open a socket to it to attempt auth.
+#
+# Selecting the orchestrator pod flips it to default-deny for Ingress, so every
+# source except the one allowed below is denied. This governs Ingress to the
+# orchestrator only; it does not restrict egress, and the kube-network-policies
+# controller that enforces it in dev permits node-sourced kubelet health probes.
+#
+# NOTE: kind's default CNI (kindnet) does NOT enforce NetworkPolicy, so `make
+# dev-up` installs the kube-network-policies controller to enforce this in dev
+# (docs/adr/0033). On a cluster whose CNI ignores NetworkPolicy this manifest is
+# inert (fail-open), so it is defense-in-depth layered over the auth controls
+# (docs/adr/0031, 0032) — never the sole control.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zumble-zay-orchestrator-ingress
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: orchestrator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zumble-zay
+      app.kubernetes.io/component: orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the web tier — the sole control-API client — may reach the control
+    # port. A runtime pod (any namespace) is denied at the network layer.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: zumble-zay
+              app.kubernetes.io/component: backend
+      ports:
+        - protocol: TCP
+          port: 8090

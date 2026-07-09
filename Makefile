@@ -89,6 +89,14 @@ PRIMER_DIR := internal/webui/static/primer
 KIND_CLUSTER ?= zumble-zay
 KUBE_NS := zumble-zay
 
+# The base kustomization ships a default-deny NetworkPolicy on the orchestrator's
+# control API (docs/adr/0033). kind's default CNI (kindnet) does NOT enforce
+# NetworkPolicy, so dev-up installs the kube-network-policies controller (a
+# kubernetes-sigs DaemonSet that enforces standard NetworkPolicy via nftables) to
+# make the policy live in dev. Pinned + overridable; set to empty to skip the
+# install (the policy then stays inert/fail-open, exactly as on bare kindnet).
+KUBE_NETWORK_POLICIES_VERSION ?= v1.1.0
+
 # kind must use the podman provider when podman is the chosen engine.
 ifeq ($(findstring podman,$(CONTAINER_ENGINE)),podman)
 export KIND_EXPERIMENTAL_PROVIDER = podman
@@ -345,6 +353,18 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	@if [ "$(LAUNCHER)" = "kagent" ]; then \
 		echo "loading A2A runtime image + installing the kagent control plane"; \
 		$(MAKE) kind-load-runtime-a2a kagent-install; \
+	fi
+	# Enforce the base NetworkPolicy in dev (docs/adr/0033): the orchestrator ships
+	# a default-deny control-API policy, but kindnet ignores NetworkPolicy, so
+	# install the kube-network-policies controller to make it live. Best-effort —
+	# the policy is defense-in-depth over the auth controls (docs/adr/0031, 0032)
+	# and fail-open, so a transient install failure degrades to the pre-0033 kindnet
+	# behavior rather than blocking the dev loop. Skip with an empty version.
+	@if [ -n "$(KUBE_NETWORK_POLICIES_VERSION)" ]; then \
+		echo "installing kube-network-policies $(KUBE_NETWORK_POLICIES_VERSION) (enforces NetworkPolicy on kindnet)"; \
+		kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/kube-network-policies/$(KUBE_NETWORK_POLICIES_VERSION)/install.yaml \
+			|| echo "WARNING: kube-network-policies install failed; the orchestrator NetworkPolicy stays unenforced in dev (defense-in-depth only, not a blocker)"; \
+		kubectl -n kube-system rollout status ds/kube-network-policies --timeout=90s || true; \
 	fi
 	kubectl apply -k deploy/k8s/overlays/dev
 	# The kagent BYO Agent lives in the zumble-zay namespace (the kagent controller

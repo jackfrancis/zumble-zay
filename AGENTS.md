@@ -115,7 +115,14 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   token (kagent) instead receives a **single-use redemption ticket** and exchanges
   it for the token at `POST /agent/token` → `POST /control/redeem` (ADR 0030): the
   ticket is job-bound, short-TTL, consumed on first use, and is itself the
-  authorization, so no minting secret rides on the runtime.
+  authorization, so no minting secret rides on the runtime. Beneath the auth
+  controls, a default-deny NetworkPolicy fronts the control API at L3/L4 (ADR
+  0033): only the web tier (`component: backend`) may open a socket to the
+  orchestrator's control port — a runtime pod in any namespace is denied at the
+  network layer. It is enforced in dev by the kube-network-policies controller
+  (kindnet does not enforce NetworkPolicy), fail-open and defense-in-depth over
+  the auth controls, never the sole control. In-transit encryption and
+  within-plane replay remain the mTLS half of the transport follow-up.
 - Token vault encrypted at rest (KMS) once persisted. Agents connect to
   providers **directly** with a short-lived credential **vended by ZZ on demand**
   (ADR 0006); ZZ never proxies provider data. ZZ core packages must not import a
@@ -176,7 +183,8 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   your first PR so two efforts don't claim the same one — reserved so far:
   **0027** opensandbox, **0028** ray/kuberay, **0029** kagent, **0030** job-token
   pull-path, **0031** control-plane caller identity, **0032** agent-plane token
-  audience.
+  audience, **0033** control-plane transport isolation (NetworkPolicy). Next free
+  ADR = **0034**.
 
 ## Build / dev / test
 

@@ -36,3 +36,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0030](0030-job-token-pull-path.md) | Job-token pull-path: single-use ticket redemption keeps the live token out of a durable runtime's persisted task history | Accepted |
 | [0031](0031-control-plane-caller-identity.md) | Control-plane per-service caller identity: the orchestrator validates the web tier's projected ServiceAccount token via TokenReview | Accepted |
 | [0032](0032-agent-plane-token-audience.md) | Audience-bind the job token to the agent plane: `aud=zumble-zay-agent`, and disjoint user/agent auth planes | Accepted |
+| [0033](0033-control-plane-transport-isolation.md) | Transport isolation for the control plane: a default-deny NetworkPolicy fronts the orchestrator, enforced in dev via kube-network-policies | Accepted |
