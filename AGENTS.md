@@ -223,8 +223,10 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    reaches it through `controlplane.Client` (co-located `Local` or remote `HTTP`
    control API). Job tokens are now asymmetric (Ed25519): the orchestrator is the
    sole issuer, the web tier verifies only. Remaining: move the reconciler to the
-   orchestrator once the store is shared (#5); independent mint keys for true
-   issuer/verifier key separation in production.
+   orchestrator once the store is shared (#5); provisioning independent mint keys
+   for true issuer/verifier key separation in production — `make mint-keys` emits
+   the pair (base64 `MINT_PRIVATE_KEY`/`MINT_PUBLIC_KEY`, honored by config), and
+   wiring each half to its tier is a deploy-time choice.
 4. ZZ metadata write path beyond ingestion: `PATCH /api/datapoints/{id}/metadata`,
    scope-gated, with provenance and optimistic concurrency.
 5. Cloud persistence behind `worklist.Store`; shared session store; then scale

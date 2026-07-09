@@ -1,4 +1,4 @@
-.PHONY: build run test tidy vet fmt clean image image-save kind-load engine \
+.PHONY: build run mint-keys test tidy vet fmt clean image image-save kind-load engine \
         cluster-up cluster-down dev-up dev-down dev-forward dev-logs dev-logs-orchestrator \
         build-runtime image-runtime image-runtime-save kind-load-runtime \
         build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer \
@@ -115,6 +115,14 @@ build-orchestrator:
 
 run:
 	go run ./cmd/server
+
+# Generate a fresh Ed25519 job-token keypair for true issuer/verifier separation
+# in a split deployment (docs/adr/0023): MINT_PRIVATE_KEY goes to the orchestrator
+# (a secret; the sole signer) and MINT_PUBLIC_KEY to the web tier (config; verify
+# only). Without it both tiers derive the pair from SESSION_SECRET, which also
+# lets the web tier mint.
+mint-keys:
+	@go run ./cmd/mint-keygen
 
 test:
 	go test ./...
