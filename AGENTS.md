@@ -184,7 +184,8 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   **0027** opensandbox, **0028** ray/kuberay, **0029** kagent, **0030** job-token
   pull-path, **0031** control-plane caller identity, **0032** agent-plane token
   audience, **0033** control-plane transport isolation (NetworkPolicy), **0034**
-  retire the shared-bearer control-plane fallback. Next free ADR = **0035**.
+  retire the shared-bearer control-plane fallback, **0035** Agent Substrate
+  (durable, multiplexed suspend/resume substrate). Next free ADR = **0036**.
 
 ## Build / dev / test
 
@@ -286,6 +287,27 @@ credential and writes results back to ZZ (ADR 0006, 0007).
    identity via TokenReview across all control routes, chained over the shared
    bearer); remaining is transport (mTLS/`NetworkPolicy`) plus per-service identity
    on the runtime→web `/agent/*` plane, and `KueueLauncher` (admission/quota).
+   **DONE — Agent Substrate (ADR 0035):** `internal/substrate` is the first
+   *durable + multiplexed + snapshotted* substrate — Agent Substrate ("ate")
+   multiplexes actors onto warm workers and gVisor-checkpoints an actor's whole
+   RAM/FS to object storage on suspend/resume. It follows the kagent archetype: a
+   **standing actor** (provisioned out-of-band via `deploy/k8s/substrate` +
+   `kubectl ate`) runs the exact `cmd/runtime-a2a` image, and the launcher
+   dispatches each job as an A2A `message/send` over `net/http` through the
+   `atenet-router` (which auto-resumes the actor on the traffic), per-job params +
+   a pull-ticket in the metadata (`SUBSTRATE_*` read in `build()`, so
+   `internal/config` + `go.mod` are untouched; no gRPC on the dispatch path, so no
+   build tag). Two novel constraints, both already absorbed by prior decisions: the
+   actor's env is frozen in the golden snapshot (so per-job values *must* ride the
+   dispatch, as since ADR 0029), and a live token in the actor's RAM would be
+   snapshotted at rest (so the pull-ticket of ADR 0030 is mandatory, not merely
+   tidy). Select with `LAUNCHER=substrate`. EXPERIMENTAL (Substrate is v0.0.0):
+   `make substrate-install` wires ZZ's actor against an existing ate-system but
+   does not stand up ate-system (gVisor + object store) itself. The north-star
+   follow-up is identity composition — ZZ validating a Substrate-minted
+   `SessionIdentity` JWT via the `authn.TokenValidator` seam (ZZ as a resource
+   server on the substrate's own IdP), plus the same `/agent/*` transport
+   hardening kagent still owes.
 7. **Prompt & context tuning is now the primary correctness lever (ADR 0015).**
    The LLM is authoritative for the four axes, so ranking quality is steered in
    `internal/llm/prompt.go` — sharper axis definitions, the user's priorities and

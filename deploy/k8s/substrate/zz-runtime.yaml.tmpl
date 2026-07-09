@@ -1,0 +1,95 @@
+# The Zumble-Zay agent runtime as a durable Agent Substrate ("ate") actor
+# (docs/adr/0035). EXPERIMENTAL — Agent Substrate is v0.0.0; treat this as a
+# validation substrate, not a production path.
+#
+# This is a template (${...} placeholders), matching Substrate's own demo
+# convention (demos/*/*.yaml.tmpl). `make substrate-install` substitutes the
+# values and applies it into an ALREADY-RUNNING ate-system; it does not stand up
+# ate-system (gVisor + object store + control plane) itself.
+#
+# The actor runs the exact cmd/runtime-a2a image the kagent substrate uses (the ZZ
+# runtime behind an A2A endpoint), so the orchestrator's substrate launcher
+# dispatches each job to it as an A2A message/send through the atenet-router,
+# which auto-resumes the actor on the traffic (docs/adr/0035). Only STATIC config
+# lives here (frozen into the golden snapshot); the per-job values (job type,
+# provider, item, and the single-use redemption ticket) ride the dispatch metadata.
+#
+# Placeholders:
+#   ${SUBSTRATE_NAMESPACE}   k8s namespace holding the WorkerPool + ActorTemplate
+#   ${WORKER_REPLICAS}       warm standby worker pods in the pool
+#   ${ATEOM_IMAGE}           the installed gVisor "ateom" herder image (pinned)
+#   ${RUNTIME_A2A_IMAGE}     the ZZ runtime-a2a image — MUST be a cluster-pullable
+#                            DIGEST reference (name@sha256:…); the ActorTemplate
+#                            CRD rejects unpinned images ("changing the image
+#                            invalidates snapshots"), so the kind-loaded :dev tag
+#                            does not qualify — push it or resolve it out of band.
+#   ${PAUSE_IMAGE}           a pinned sandbox-root pause image
+#   ${SNAPSHOT_LOCATION}     object-store URL for memory snapshots (e.g. gs://…)
+#   ${ZZ_BASE_URL}           the ZZ web tier (cross-namespace FQDN — the actor runs
+#                            in ate-land, not the web tier's namespace)
+#   ${ZZ_AI_ENDPOINT}        the in-cluster agentgateway chat-completions URL
+#   ${ZZ_AI_MODEL}           the ranking model id
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${SUBSTRATE_NAMESPACE}
+---
+# Physical warm capacity: a fleet of standby worker pods the actor is multiplexed
+# onto. ateomImage is Substrate's own gVisor herder (from your ate-system install),
+# so it must be a real pinned reference — a bare `ko://…` is only resolvable by the
+# Substrate tooling, not plain `kubectl apply`.
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: zz-runtime
+  namespace: ${SUBSTRATE_NAMESPACE}
+  labels:
+    workload: zz-runtime
+spec:
+  replicas: ${WORKER_REPLICAS}
+  ateomImage: ${ATEOM_IMAGE}
+  # sandboxClass defaults to gvisor; the pool resolves the cluster-default gVisor
+  # SandboxConfig (runsc) unless a sandboxConfigName is set.
+---
+# The workload blueprint. Creating it triggers a Golden Snapshot (the immutable
+# state root every actor of this template resumes from), so the whole spec is
+# immutable and every image must be pinned by digest.
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: zz-runtime
+  namespace: ${SUBSTRATE_NAMESPACE}
+spec:
+  pauseImage: "${PAUSE_IMAGE}"
+  containers:
+  - name: runtime
+    image: ${RUNTIME_A2A_IMAGE}
+    env:
+    # The atenet-router forwards inbound traffic to the actor's port 80 (the only
+    # inbound port it maps today), and the distroless runtime-a2a listens on $PORT
+    # (default 8080), so pin it to 80. Substrate's own :80 demos (demos/agent-secret,
+    # demos/sandbox) bind 80 with just this env under gVisor; if a given cluster's
+    # sandbox enforces privileged ports, add a uid-0 securityContext here.
+    - name: PORT
+      value: "80"
+    # Static configuration only — captured in the golden snapshot and shared by
+    # every actor. Per-job values ride the dispatch metadata, never here.
+    - name: ZZ_BASE_URL
+      value: ${ZZ_BASE_URL}
+    - name: ZZ_AI_ENDPOINT
+      value: ${ZZ_AI_ENDPOINT}
+    - name: ZZ_AI_MODEL
+      value: ${ZZ_AI_MODEL}
+    # Gate Run/Restore on the runtime actually serving: the A2A agent card returns
+    # 200 without any per-job state, and declaring readyz on every container also
+    # lets the template skip its ~20s golden-snapshot warm-up delay.
+    readyz:
+      httpGet:
+        path: /.well-known/agent-card.json
+        port: 80
+  workerSelector:
+    matchLabels:
+      workload: zz-runtime
+  snapshotsConfig:
+    location: ${SNAPSHOT_LOCATION}

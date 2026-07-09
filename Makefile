@@ -3,7 +3,8 @@
         build-runtime image-runtime image-runtime-save kind-load-runtime \
         build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer \
         image-runtime-shell image-runtime-shell-save kind-load-runtime-shell opensandbox-install \
-        image-runtime-a2a image-runtime-a2a-save kind-load-runtime-a2a kagent-install
+        image-runtime-a2a image-runtime-a2a-save kind-load-runtime-a2a kagent-install \
+        substrate-install
 
 BIN := bin/server
 
@@ -78,6 +79,31 @@ RUNTIME_A2A_IMAGE ?= localhost/zumble-zay-runtime-a2a:dev
 # (ZZ_AI_ENDPOINT), not kagent's own ModelConfig.
 KAGENT_VERSION ?= 0.9.11
 KAGENT_NAMESPACE ?= kagent
+
+# Agent Substrate (LAUNCHER=substrate) dev-install knobs — all overridable
+# (docs/adr/0035). EXPERIMENTAL: Substrate is v0.0.0 and needs a full ate-system
+# (gVisor, object store, a WorkerPool, kubectl-ate) that `make substrate-install`
+# does NOT stand up — it applies ZZ's pool/template/actor against an EXISTING
+# ate-system and points the orchestrator at the atenet-router. The actor reuses the
+# cmd/runtime-a2a image, served on :80. Cross-namespace FQDNs because the actor
+# runs in ate-land, not the web tier's namespace (cf. opensandbox, ADR 0027).
+SUBSTRATE_NAMESPACE ?= zumble-zay-substrate
+SUBSTRATE_ATESPACE ?= zumble-zay
+SUBSTRATE_ACTOR ?= zz-runtime
+SUBSTRATE_TEMPLATE ?= $(SUBSTRATE_NAMESPACE)/zz-runtime
+SUBSTRATE_WORKER_REPLICAS ?= 2
+# The gVisor "ateom" herder image your ate-system installed; override to match it
+# (a bare ko:// ref is only resolvable by Substrate's own tooling, not kubectl).
+SUBSTRATE_ATEOM_IMAGE ?= ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+SUBSTRATE_PAUSE_IMAGE ?= registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+# MUST be a cluster-pullable digest (name@sha256:…) — the ActorTemplate rejects
+# unpinned images, so the kind-loaded :dev tag does not qualify.
+SUBSTRATE_RUNTIME_IMAGE ?= $(RUNTIME_A2A_IMAGE)
+SUBSTRATE_SNAPSHOT_LOCATION ?= gs://REPLACE-ME/zz-runtime/
+SUBSTRATE_ROUTER_URL ?= http://atenet-router.ate-system.svc.cluster.local
+SUBSTRATE_ZZ_BASE_URL ?= http://zumble-zay.$(KUBE_NS).svc.cluster.local:8080
+SUBSTRATE_ZZ_AI_ENDPOINT ?= http://zumble-zay-agentgateway.$(KUBE_NS).svc.cluster.local/chat/completions
+SUBSTRATE_ZZ_AI_MODEL ?= claude-opus-4.8
 
 # Vendored GitHub Primer CSS (the UI's design system, served from the binary).
 # `make vendor-primer` refreshes these at the pinned versions; bump the versions
@@ -262,6 +288,47 @@ kagent-install:
 		--set providers.default=openAI --set providers.openAI.apiKey=sk-kagent-dev-unused \
 		--wait --timeout 360s
 
+# EXPERIMENTAL (docs/adr/0035): apply the ZZ runtime as a durable Agent Substrate
+# actor into an ALREADY-RUNNING ate-system, so LAUNCHER=substrate has an actor to
+# dispatch to. This does NOT install ate-system itself (gVisor + object store +
+# control plane) — stand that up first with Substrate's own tooling (e.g.
+# hack/install-ate-kind.sh --deploy-ate-system from github.com/agent-substrate/
+# substrate). It substitutes the SUBSTRATE_* knobs into the pool/template template,
+# applies it, waits for the golden snapshot, and creates the atespace + actor via
+# kubectl-ate. The runtime image must be a cluster-pullable digest and the snapshot
+# location your object store — both overridable knobs above.
+substrate-install:
+	@command -v kubectl >/dev/null || { echo "kubectl not installed"; exit 1; }
+	@case "$(SUBSTRATE_SNAPSHOT_LOCATION)" in *REPLACE-ME*) \
+		echo "set SUBSTRATE_SNAPSHOT_LOCATION to your ate-system object store (e.g. gs://bucket/zz/)"; exit 1;; esac
+	@case "$(SUBSTRATE_RUNTIME_IMAGE)" in *@sha256:*) ;; *) \
+		echo "WARNING: SUBSTRATE_RUNTIME_IMAGE=$(SUBSTRATE_RUNTIME_IMAGE) is not pinned by digest;"; \
+		echo "         the ActorTemplate CRD requires name@sha256:… (snapshot immutability).";; esac
+	@kubectl get -n ate-system svc/atenet-router >/dev/null 2>&1 || { \
+		echo "no svc/atenet-router in ate-system — stand up Agent Substrate first"; \
+		echo "(see https://github.com/agent-substrate/substrate)"; exit 1; }
+	sed -e 's|$${SUBSTRATE_NAMESPACE}|$(SUBSTRATE_NAMESPACE)|g' \
+	    -e 's|$${WORKER_REPLICAS}|$(SUBSTRATE_WORKER_REPLICAS)|g' \
+	    -e 's|$${ATEOM_IMAGE}|$(SUBSTRATE_ATEOM_IMAGE)|g' \
+	    -e 's|$${RUNTIME_A2A_IMAGE}|$(SUBSTRATE_RUNTIME_IMAGE)|g' \
+	    -e 's|$${PAUSE_IMAGE}|$(SUBSTRATE_PAUSE_IMAGE)|g' \
+	    -e 's|$${SNAPSHOT_LOCATION}|$(SUBSTRATE_SNAPSHOT_LOCATION)|g' \
+	    -e 's|$${ZZ_BASE_URL}|$(SUBSTRATE_ZZ_BASE_URL)|g' \
+	    -e 's|$${ZZ_AI_ENDPOINT}|$(SUBSTRATE_ZZ_AI_ENDPOINT)|g' \
+	    -e 's|$${ZZ_AI_MODEL}|$(SUBSTRATE_ZZ_AI_MODEL)|g' \
+	    deploy/k8s/substrate/zz-runtime.yaml.tmpl | kubectl apply -f -
+	@echo "waiting for the ActorTemplate golden snapshot to be Ready (can take minutes)"
+	kubectl wait --for=condition=Ready actortemplate/zz-runtime -n $(SUBSTRATE_NAMESPACE) --timeout=600s || true
+	@if command -v kubectl-ate >/dev/null; then \
+		kubectl ate create atespace $(SUBSTRATE_ATESPACE) || true; \
+		kubectl ate create actor $(SUBSTRATE_ACTOR) -a $(SUBSTRATE_ATESPACE) --template=$(SUBSTRATE_TEMPLATE) || true; \
+	else \
+		echo "kubectl-ate not on PATH; install it and create the actor manually:"; \
+		echo "  go install github.com/agent-substrate/substrate/cmd/kubectl-ate@latest"; \
+		echo "  kubectl ate create atespace $(SUBSTRATE_ATESPACE)"; \
+		echo "  kubectl ate create actor $(SUBSTRATE_ACTOR) -a $(SUBSTRATE_ATESPACE) --template=$(SUBSTRATE_TEMPLATE)"; \
+	fi
+
 # Export the orchestrator image to a portable archive (docs/adr/0023).
 image-orchestrator-save: image-orchestrator
 	$(CONTAINER_ENGINE) save $(ORCHESTRATOR_IMAGE) -o zumble-zay-orchestrator-image.tar
@@ -355,6 +422,13 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 		echo "loading A2A runtime image + installing the kagent control plane"; \
 		$(MAKE) kind-load-runtime-a2a kagent-install; \
 	fi
+	# Optional Agent Substrate substrate (docs/adr/0035): apply the ZZ actor into an
+	# existing ate-system so the orchestrator has an actor to dispatch to. Only when
+	# selected. EXPERIMENTAL — substrate-install does not stand up ate-system itself.
+	@if [ "$(LAUNCHER)" = "substrate" ]; then \
+		echo "installing the ZZ Agent Substrate actor (experimental)"; \
+		$(MAKE) substrate-install; \
+	fi
 	# Enforce the base NetworkPolicy in dev (docs/adr/0033): the orchestrator ships
 	# a default-deny control-API policy, but kindnet ignores NetworkPolicy, so
 	# install the kube-network-policies controller to make it live. Best-effort —
@@ -394,6 +468,14 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 			OPENSANDBOX_API_KEY=$(OPENSANDBOX_API_KEY) \
 			OPENSANDBOX_RUNTIME_IMAGE=$(RUNTIME_SHELL_IMAGE) \
 			RUNTIME_ZZ_BASE_URL=http://zumble-zay.$(KUBE_NS).svc.cluster.local:8080; \
+	fi
+	# Agent Substrate needs the router endpoint + actor coordinates so the launcher
+	# can address the durable actor through the atenet-router (docs/adr/0035).
+	@if [ "$(LAUNCHER)" = "substrate" ]; then \
+		kubectl -n $(KUBE_NS) set env deploy/zumble-zay-orchestrator \
+			SUBSTRATE_ROUTER_URL=$(SUBSTRATE_ROUTER_URL) \
+			SUBSTRATE_ATESPACE=$(SUBSTRATE_ATESPACE) \
+			SUBSTRATE_ACTOR=$(SUBSTRATE_ACTOR); \
 	fi
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is

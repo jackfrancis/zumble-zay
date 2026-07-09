@@ -38,3 +38,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0032](0032-agent-plane-token-audience.md) | Audience-bind the job token to the agent plane: `aud=zumble-zay-agent`, and disjoint user/agent auth planes | Accepted |
 | [0033](0033-control-plane-transport-isolation.md) | Transport isolation for the control plane: a default-deny NetworkPolicy fronts the orchestrator, enforced in dev via kube-network-policies | Accepted |
 | [0034](0034-retire-shared-bearer-control-plane.md) | Retire the shared-bearer control-plane fallback: the control API authenticates every caller solely by per-service TokenReview identity | Accepted |
+| [0035](0035-agent-substrate-durable-multiplexed-substrate.md) | Agent Substrate as a durable, multiplexed (suspend/resume) runtime substrate (kagent-archetype HTTP dispatch through the atenet-router, env frozen in the golden snapshot, pull-ticket credential) | Accepted (experimental) |
