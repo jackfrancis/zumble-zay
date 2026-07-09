@@ -68,9 +68,11 @@ spec:
     env:
     # The atenet-router forwards inbound traffic to the actor's port 80 (the only
     # inbound port it maps today), and the distroless runtime-a2a listens on $PORT
-    # (default 8080), so pin it to 80. Substrate's own :80 demos (demos/agent-secret,
-    # demos/sandbox) bind 80 with just this env under gVisor; if a given cluster's
-    # sandbox enforces privileged ports, add a uid-0 securityContext here.
+    # (default 8080), so pin it to 80. The image is distroless-nonroot, so binding
+    # the privileged port 80 requires the uid-0 securityContext below — some gVisor
+    # sandboxes enforce the <1024 restriction, and without it the runtime dies with
+    # "listen tcp :80: bind: permission denied" and the golden snapshot never goes
+    # Ready (the ActorTemplate hangs in phase ResumeGoldenActor).
     - name: PORT
       value: "80"
     # Static configuration only — captured in the golden snapshot and shared by
@@ -88,6 +90,14 @@ spec:
       httpGet:
         path: /.well-known/agent-card.json
         port: 80
+    # Bind privileged port 80 from the distroless-nonroot image: run as uid 0. This
+    # is root-*in-gVisor-sandbox*, not root-on-node — strong isolation is Substrate's
+    # whole premise — which is why ADR 0035 chose it over dropping the port (the
+    # router only maps inbound to :80). Without it the container crashes on bind and
+    # the golden actor never reaches Ready (ActorTemplate hangs in ResumeGoldenActor).
+    securityContext:
+      runAsUser: 0
+      runAsNonRoot: false
   workerSelector:
     matchLabels:
       workload: zz-runtime
