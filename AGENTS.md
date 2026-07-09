@@ -211,9 +211,11 @@ credential and writes results back to ZZ (ADR 0006, 0007).
 1. **Harden the GitHub credential in place (ADR 0013).** A GitHub App is ruled
    out — its user-to-server tokens are installation-scoped and cannot read the
    cross-org repos the radar depends on. Stay on the read-only/public OAuth App
-   and bound the exposure instead: revoke the stored credential on logout, and
-   encrypt the vault at rest (lands with persistence, since the vault is
-   in-memory today).
+   and bound the exposure instead. **DONE — revoke-on-logout:** `auth.Handler.Logout`
+   deletes the user's vault credential and best-effort asks GitHub to invalidate
+   the token itself (`DELETE /applications/{client_id}/token`), so a copy that
+   outlived the session is useless. Remaining: encrypt the vault at rest (lands
+   with persistence, since the vault is in-memory today).
 2. Widen GitHub coverage to private repos (`repo` scope) and more signal queries.
 3. **DONE — orchestrator extracted into its own runtime + identity (ADR 0023).**
    `cmd/orchestrator` is a separate Deployment with the Pod/Job-creation RBAC and

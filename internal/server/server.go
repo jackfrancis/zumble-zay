@@ -96,10 +96,7 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, v
 	})
 	mux.HandleFunc("GET /auth/{provider}/login", authH.Login)
 	mux.HandleFunc("GET /auth/{provider}/callback", authH.Callback)
-	mux.HandleFunc("POST /auth/logout", func(w http.ResponseWriter, r *http.Request) {
-		sessions.Destroy(w, r)
-		w.WriteHeader(http.StatusNoContent)
-	})
+	mux.HandleFunc("POST /auth/logout", authH.Logout)
 
 	// Current principal (interactive user today; workloads once tokens exist).
 	mux.Handle("GET /api/me", authenticator.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

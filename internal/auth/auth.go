@@ -3,10 +3,12 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,10 +36,11 @@ type provider struct {
 
 // Handler exposes HTTP handlers for the OAuth login lifecycle.
 type Handler struct {
-	sessions  *session.Manager
-	providers map[string]*provider
-	client    *http.Client
-	vault     vault.Vault
+	sessions      *session.Manager
+	providers     map[string]*provider
+	client        *http.Client
+	vault         vault.Vault
+	githubAPIBase string // GitHub REST base URL; overridable in tests
 }
 
 // NewHandler builds the auth handler from configuration. Only providers with
@@ -46,10 +49,11 @@ type Handler struct {
 // to act on their behalf (ADR 0006).
 func NewHandler(cfg *config.Config, sessions *session.Manager, vlt vault.Vault) *Handler {
 	h := &Handler{
-		sessions:  sessions,
-		providers: make(map[string]*provider),
-		client:    &http.Client{Timeout: 10 * time.Second},
-		vault:     vlt,
+		sessions:      sessions,
+		providers:     make(map[string]*provider),
+		client:        &http.Client{Timeout: 10 * time.Second},
+		vault:         vlt,
+		githubAPIBase: "https://api.github.com",
 	}
 
 	redirect := func(name string) string {
@@ -233,6 +237,63 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	h.sessions.Authenticate(w, r, user)
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// Logout ends the interactive session and best-effort revokes the delegated
+// provider credential the login left in the vault (docs/adr/0013): it deletes
+// the vault entry and, for GitHub, asks the provider to invalidate the access
+// token itself so a copy that outlived the session is useless. Revocation never
+// blocks logout — the session is always destroyed and the response is 204.
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	if u := h.sessions.CurrentUser(r); u != nil && h.vault != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		// Read the credential before deleting it so the token can still be
+		// revoked at the provider; the local delete happens regardless.
+		cred, err := h.vault.Get(ctx, u.ID, u.Provider)
+		_ = h.vault.Delete(ctx, u.ID, u.Provider)
+		if err == nil && u.Provider == "github" && cred.AccessToken != "" {
+			if rerr := h.revokeGitHubToken(ctx, cred.AccessToken); rerr != nil {
+				slog.WarnContext(ctx, "github token revocation on logout failed",
+					"user", u.ID, "error", rerr)
+			}
+		}
+	}
+	h.sessions.Destroy(w, r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// revokeGitHubToken asks GitHub to invalidate an OAuth access token via
+// DELETE /applications/{client_id}/token, authenticated with the app's own
+// client credentials (docs/adr/0013). A 2xx or 404 (already gone) is success.
+func (h *Handler) revokeGitHubToken(ctx context.Context, accessToken string) error {
+	p, ok := h.providers["github"]
+	if !ok {
+		return fmt.Errorf("github provider not configured")
+	}
+	body, err := json.Marshal(map[string]string{"access_token": accessToken})
+	if err != nil {
+		return err
+	}
+	url := h.githubAPIBase + "/applications/" + p.oauth.ClientID + "/token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(p.oauth.ClientID, p.oauth.ClientSecret)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "zumble-zay")
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("github token revocation: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // Credential returns a usable credential for the user and provider, refreshing

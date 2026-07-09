@@ -30,6 +30,10 @@ type Vault interface {
 	Put(ctx context.Context, userID string, cred Credential) error
 	// Get returns the credential for a user and provider, or ErrNotFound.
 	Get(ctx context.Context, userID, provider string) (Credential, error)
+	// Delete removes the credential for a user and provider. Deleting a
+	// credential that does not exist is not an error, so logout can revoke
+	// unconditionally.
+	Delete(ctx context.Context, userID, provider string) error
 }
 
 // MemoryVault is an in-memory Vault for development and tests. The KMS-backed
@@ -69,4 +73,18 @@ func (v *MemoryVault) Get(_ context.Context, userID, provider string) (Credentia
 		return Credential{}, ErrNotFound
 	}
 	return cred, nil
+}
+
+// Delete removes the stored credential for a user and provider. It is a no-op
+// (not an error) when none exists, so logout can call it unconditionally.
+func (v *MemoryVault) Delete(_ context.Context, userID, provider string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if byProvider := v.creds[userID]; byProvider != nil {
+		delete(byProvider, provider)
+		if len(byProvider) == 0 {
+			delete(v.creds, userID)
+		}
+	}
+	return nil
 }
