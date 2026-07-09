@@ -40,10 +40,11 @@ spec:
             - name: control
               containerPort: 8090
           envFrom:
-            # Shares the config (LAUNCHER, RUNTIME_*, AI_*) and the Secret
-            # (SESSION_SECRET, CONTROL_PLANE_TOKEN, AI_TOKEN, and in a hardened
-            # deployment MINT_PRIVATE_KEY). It ignores web-only keys it does not
-            # read (e.g. CONTROL_PLANE_URL is set only on the web Deployment).
+            # Shares the config (LAUNCHER, RUNTIME_*, AI_*, CONTROL_PLANE_AUDIENCE /
+            # CONTROL_PLANE_CALLERS — the per-service caller identity it enforces,
+            # docs/adr/0031, 0034) and the Secret (SESSION_SECRET, AI_TOKEN, and in a
+            # hardened deployment MINT_PRIVATE_KEY). It ignores web-only keys it does
+            # not read (e.g. CONTROL_PLANE_URL is set only on the web Deployment).
             - configMapRef:
                 name: zumble-zay-config
             - secretRef:

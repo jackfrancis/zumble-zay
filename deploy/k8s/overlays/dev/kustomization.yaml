@@ -25,39 +25,10 @@ patches:
       kind: Ingress
       metadata:
         name: zumble-zay
-  # Give the web tier a projected ServiceAccount token scoped to the
-  # orchestrator's audience and point the control client at it (docs/adr/0031).
-  # The web tier presents this per request instead of the shared bearer; the
-  # orchestrator validates it via TokenReview. This is the client half of the
-  # OIDC caller-identity path turned on by CONTROL_PLANE_AUDIENCE below.
-  - target:
-      kind: Deployment
-      name: zumble-zay
-    patch: |
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: zumble-zay
-      spec:
-        template:
-          spec:
-            containers:
-              - name: server
-                env:
-                  - name: CONTROL_PLANE_TOKEN_PATH
-                    value: /var/run/secrets/zumble-zay/control/token
-                volumeMounts:
-                  - name: control-token
-                    mountPath: /var/run/secrets/zumble-zay/control
-                    readOnly: true
-            volumes:
-              - name: control-token
-                projected:
-                  sources:
-                    - serviceAccountToken:
-                        path: token
-                        audience: zumble-zay-orchestrator
-                        expirationSeconds: 3600
+
+# The web tier's projected ServiceAccount token (control-plane identity) and the
+# CONTROL_PLANE_AUDIENCE/CALLERS config now live in the base (docs/adr/0034), so
+# the dev overlay no longer patches them in.
 
 # Override config for local, non-TLS access via port-forward.
 configMapGenerator:
@@ -77,14 +48,6 @@ configMapGenerator:
       # resolves in-namespace — silently dropping those jobs to the baseline ranker.
       - AI_ENDPOINT=http://zumble-zay-agentgateway.zumble-zay.svc.cluster.local/chat/completions
       - AI_TOKEN_SECRET_NAME=
-      # Per-service caller identity for the control API (docs/adr/0031): the
-      # orchestrator validates the web tier's projected ServiceAccount token via
-      # TokenReview for this audience and checks the caller SA against the
-      # allowlist. Read only by the orchestrator; harmless on the web tier, which
-      # ignores these keys. The shared CONTROL_PLANE_TOKEN stays as the chain
-      # fallback for co-located runs and migration.
-      - CONTROL_PLANE_AUDIENCE=zumble-zay-orchestrator
-      - CONTROL_PLANE_CALLERS=system:serviceaccount:zumble-zay:zumble-zay
 
 images:
   - name: zumble-zay

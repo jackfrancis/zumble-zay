@@ -3,6 +3,7 @@ package controlplane_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -65,6 +66,27 @@ func (f *fakeController) RedeemTicket(ticket string) (string, time.Duration, err
 	return f.redeemTok, 10 * time.Minute, nil
 }
 
+// stubAuthenticator is a test CallerAuthenticator: it authenticates a request
+// only when its bearer matches want. The real per-service TokenReview
+// authenticator is exercised in internal/controlauth; the stub lets these tests
+// focus on the control API's HTTP plumbing (docs/adr/0034).
+type stubAuthenticator struct{ want string }
+
+func (s stubAuthenticator) Authenticate(r *http.Request) (controlplane.Caller, error) {
+	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if got != s.want {
+		return controlplane.Caller{}, errors.New("controlplane_test: caller not authenticated")
+	}
+	return controlplane.Caller{Subject: "test", Trusted: true}, nil
+}
+
+// staticSource is a control-token source that always returns tok — standing in
+// for the projected ServiceAccount token the web tier reads from a file
+// (docs/adr/0034).
+func staticSource(tok string) func() (string, error) {
+	return func() (string, error) { return tok, nil }
+}
+
 func TestLocalDelegatesToController(t *testing.T) {
 	fc := &fakeController{active: map[string]bool{"u1": true}}
 	c := controlplane.NewLocal(fc)
@@ -98,15 +120,14 @@ func TestLocalDelegatesToController(t *testing.T) {
 }
 
 func TestHTTPRoundTripsThroughHandler(t *testing.T) {
-	const token = "control-token-abc"
 	fc := &fakeController{active: map[string]bool{"u1": true}}
-	h := controlplane.NewHandler(fc, []byte(token), nil)
+	h := controlplane.NewHandler(fc, stubAuthenticator{want: "sa-token"}, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	c := controlplane.NewHTTP(ts.URL, ts.Client(), []byte(token))
+	c := controlplane.NewHTTP(ts.URL, ts.Client(), staticSource("sa-token"))
 	ctx := context.Background()
 
 	if err := c.EnsureBackfill(ctx, "u1"); err != nil {
@@ -140,15 +161,14 @@ func TestHTTPRoundTripsThroughHandler(t *testing.T) {
 }
 
 func TestCompleteForwardsToController(t *testing.T) {
-	const token = "control-token-abc"
 	fc := &fakeController{active: map[string]bool{}}
-	h := controlplane.NewHandler(fc, []byte(token), nil)
+	h := controlplane.NewHandler(fc, stubAuthenticator{want: "sa-token"}, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	c := controlplane.NewHTTP(ts.URL, ts.Client(), []byte(token))
+	c := controlplane.NewHTTP(ts.URL, ts.Client(), staticSource("sa-token"))
 	if err := c.Complete(context.Background(), "job-1", "boom"); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
@@ -175,15 +195,14 @@ func TestLocalRedeemTicket(t *testing.T) {
 }
 
 func TestRedeemTicketForwardsToController(t *testing.T) {
-	const token = "control-token-abc"
 	fc := &fakeController{active: map[string]bool{}, redeemTok: "minted-job-token"}
-	h := controlplane.NewHandler(fc, []byte(token), nil)
+	h := controlplane.NewHandler(fc, stubAuthenticator{want: "sa-token"}, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	c := controlplane.NewHTTP(ts.URL, ts.Client(), []byte(token))
+	c := controlplane.NewHTTP(ts.URL, ts.Client(), staticSource("sa-token"))
 	tok, exp, err := c.RedeemTicket(context.Background(), "ticket-xyz")
 	if err != nil {
 		t.Fatalf("RedeemTicket: %v", err)
@@ -198,24 +217,45 @@ func TestRedeemTicketForwardsToController(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsBadToken(t *testing.T) {
+func TestHandlerRejectsUnauthenticatedCaller(t *testing.T) {
 	fc := &fakeController{}
-	h := controlplane.NewHandler(fc, []byte("right-token"), nil)
+	h := controlplane.NewHandler(fc, stubAuthenticator{want: "sa-token"}, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	// A client with the wrong token must be rejected, and the controller must
-	// never be reached.
-	c := controlplane.NewHTTP(ts.URL, ts.Client(), []byte("wrong-token"))
+	// A caller whose identity does not authenticate must be rejected, and the
+	// controller must never be reached.
+	c := controlplane.NewHTTP(ts.URL, ts.Client(), staticSource("wrong-token"))
 	if err := c.EnsureBackfill(context.Background(), "u1"); err == nil {
-		t.Fatal("expected an error for a bad control token")
+		t.Fatal("expected an error when the caller is not authenticated")
 	}
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if len(fc.ingest) != 0 {
-		t.Fatalf("controller was reached despite a bad token: %v", fc.ingest)
+		t.Fatalf("controller was reached despite a rejected caller: %v", fc.ingest)
+	}
+}
+
+// A Handler built without an authenticator must fail closed (deny all), so a
+// misconfiguration never leaves the control API open (docs/adr/0034).
+func TestHandlerNilAuthenticatorFailsClosed(t *testing.T) {
+	fc := &fakeController{}
+	h := controlplane.NewHandler(fc, nil, nil)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := controlplane.NewHTTP(ts.URL, ts.Client(), staticSource("sa-token"))
+	if err := c.EnsureBackfill(context.Background(), "u1"); err == nil {
+		t.Fatal("expected a nil authenticator to deny every request")
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.ingest) != 0 {
+		t.Fatalf("controller was reached with a nil authenticator: %v", fc.ingest)
 	}
 }
 
@@ -236,7 +276,7 @@ func TestTokenExchangeIssuesScopedToken(t *testing.T) {
 	const ctrlToken = "control-token-abc"
 	fc := &fakeController{active: map[string]bool{}}
 	issuer := &fakeIssuer{}
-	h := controlplane.NewHandler(fc, []byte(ctrlToken), nil).
+	h := controlplane.NewHandler(fc, stubAuthenticator{want: ctrlToken}, nil).
 		WithTokenExchange(issuer)
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -295,7 +335,7 @@ func TestTokenExchangeIssuesScopedToken(t *testing.T) {
 
 func TestTokenExchangeDisabledWhenUnset(t *testing.T) {
 	const ctrlToken = "control-token-abc"
-	h := controlplane.NewHandler(&fakeController{}, []byte(ctrlToken), nil)
+	h := controlplane.NewHandler(&fakeController{}, stubAuthenticator{want: ctrlToken}, nil)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	ts := httptest.NewServer(mux)

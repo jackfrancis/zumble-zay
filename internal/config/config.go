@@ -52,22 +52,18 @@ type Config struct {
 	// ControlPlaneAddr is the address the orchestrator's control API listens on.
 	// It is consumed only by the orchestrator binary.
 	ControlPlaneAddr string
-	// ControlPlaneToken is the shared bearer the web tier presents to the
-	// orchestrator's control API and the orchestrator checks. The control API is
-	// cluster-internal, but it triggers privileged spawns, so it is authenticated.
-	ControlPlaneToken []byte
-	// ControlPlaneAudience, when set, makes the orchestrator authenticate control
-	// callers by their Kubernetes workload identity (a projected ServiceAccount
-	// token validated by TokenReview for this audience) in addition to the shared
-	// bearer (docs/adr/0031). Empty keeps shared-bearer-only behavior.
+	// ControlPlaneAudience is the audience the orchestrator requires a control
+	// caller's projected ServiceAccount token to be minted for; it authenticates
+	// every caller by Kubernetes workload identity via TokenReview (docs/adr/0031,
+	// 0034). The orchestrator requires it — there is no shared-secret fallback.
 	ControlPlaneAudience string
 	// ControlPlaneCallers is the allowlist of ServiceAccount usernames permitted to
-	// call the control API when ControlPlaneAudience is set, e.g.
-	// "system:serviceaccount:zumble-zay:zumble-zay" (docs/adr/0031).
+	// call the control API, e.g. "system:serviceaccount:zumble-zay:zumble-zay"
+	// (docs/adr/0031).
 	ControlPlaneCallers []string
-	// ControlPlaneTokenPath, when set, makes the web tier present the projected
-	// ServiceAccount token at this path (re-read per request as it rotates) as its
-	// control-API bearer instead of the static ControlPlaneToken (docs/adr/0031).
+	// ControlPlaneTokenPath is where the web tier reads its projected ServiceAccount
+	// token (re-read per request as the kubelet rotates it) to present as its
+	// control-API bearer (docs/adr/0031, 0034). Required for the remote control plane.
 	ControlPlaneTokenPath string
 }
 
@@ -173,7 +169,6 @@ func Load() (*Config, error) {
 		MintPublicKey:         mintPub,
 		ControlPlaneURL:       strings.TrimRight(getEnv("CONTROL_PLANE_URL", ""), "/"),
 		ControlPlaneAddr:      getEnv("CONTROL_PLANE_ADDR", ":8090"),
-		ControlPlaneToken:     []byte(os.Getenv("CONTROL_PLANE_TOKEN")),
 		ControlPlaneAudience:  os.Getenv("CONTROL_PLANE_AUDIENCE"),
 		ControlPlaneCallers:   splitAndTrim(os.Getenv("CONTROL_PLANE_CALLERS")),
 		ControlPlaneTokenPath: os.Getenv("CONTROL_PLANE_TOKEN_PATH"),

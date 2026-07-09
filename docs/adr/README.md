@@ -37,3 +37,4 @@ consequences. Newest decisions supersede older ones explicitly.
 | [0031](0031-control-plane-caller-identity.md) | Control-plane per-service caller identity: the orchestrator validates the web tier's projected ServiceAccount token via TokenReview | Accepted |
 | [0032](0032-agent-plane-token-audience.md) | Audience-bind the job token to the agent plane: `aud=zumble-zay-agent`, and disjoint user/agent auth planes | Accepted |
 | [0033](0033-control-plane-transport-isolation.md) | Transport isolation for the control plane: a default-deny NetworkPolicy fronts the orchestrator, enforced in dev via kube-network-policies | Accepted |
+| [0034](0034-retire-shared-bearer-control-plane.md) | Retire the shared-bearer control-plane fallback: the control API authenticates every caller solely by per-service TokenReview identity | Accepted |

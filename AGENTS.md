@@ -101,17 +101,17 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
 - Job tokens are asymmetric (Ed25519, ADR 0023): the **orchestrator** is the
   sole issuer (private key); the web tier holds only the public key and
   **verifies** — it must never gain minting ability. The web→orchestrator control
-  API is cluster-internal, bearer-authenticated (`CONTROL_PLANE_TOKEN`),
-  fail-closed, and never exposed through the Ingress. Pod/Job-creation RBAC binds
-  to the orchestrator ServiceAccount only, never the web tier's. The pull
+  API is cluster-internal, fail-closed, and never exposed through the Ingress.
+  Pod/Job-creation RBAC binds to the orchestrator ServiceAccount only, never the
+  web tier's. The pull
   token-exchange endpoint (`POST /control/token`, ADR 0024) issues only
   policy-scoped, single-user, short-TTL job tokens, and authenticates the caller
   behind the `CallerAuthenticator` seam — now per-service Kubernetes workload
   identity across **all** control routes (ADR 0031): the web tier presents a
   projected ServiceAccount token bound to the orchestrator's audience, the
   orchestrator validates it via TokenReview and checks the caller SA against an
-  allowlist, chained over the shared bearer as a fail-safe fallback (kept for
-  co-located and test runs). A durable runtime that must not persist a live
+  allowlist, with no shared-secret fallback — the shared bearer is retired (ADR
+  0034). A durable runtime that must not persist a live
   token (kagent) instead receives a **single-use redemption ticket** and exchanges
   it for the token at `POST /agent/token` → `POST /control/redeem` (ADR 0030): the
   ticket is job-bound, short-TTL, consumed on first use, and is itself the
@@ -183,8 +183,8 @@ deploy/k8s/          kustomize base + dev overlay (web + orchestrator Deployment
   your first PR so two efforts don't claim the same one — reserved so far:
   **0027** opensandbox, **0028** ray/kuberay, **0029** kagent, **0030** job-token
   pull-path, **0031** control-plane caller identity, **0032** agent-plane token
-  audience, **0033** control-plane transport isolation (NetworkPolicy). Next free
-  ADR = **0034**.
+  audience, **0033** control-plane transport isolation (NetworkPolicy), **0034**
+  retire the shared-bearer control-plane fallback. Next free ADR = **0035**.
 
 ## Build / dev / test
 

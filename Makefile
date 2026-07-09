@@ -292,17 +292,10 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	@kubectl create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl apply -f -
 	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets >/dev/null 2>&1 || \
 		kubectl -n $(KUBE_NS) create secret generic zumble-zay-secrets \
-			--from-literal=SESSION_SECRET="$$(openssl rand -base64 48)" \
-			--from-literal=CONTROL_PLANE_TOKEN="$$(openssl rand -base64 48)"
-	# Ensure the control-plane token exists even on a secret created before it was
-	# introduced: the create above is skipped when the secret already exists, so a
-	# pre-existing secret would otherwise lack the key and crash-loop the orchestrator.
-	@kubectl -n $(KUBE_NS) get secret zumble-zay-secrets -o jsonpath='{.data.CONTROL_PLANE_TOKEN}' 2>/dev/null | grep -q . || \
-		kubectl -n $(KUBE_NS) patch secret zumble-zay-secrets --type merge \
-			-p "{\"stringData\":{\"CONTROL_PLANE_TOKEN\":\"$$(openssl rand -base64 48 | tr -d '\n')\"}}"
+			--from-literal=SESSION_SECRET="$$(openssl rand -base64 48)"
 	# The dev overlay always runs the agentgateway as the agents' LLM egress proxy,
 	# and it resolves the provider key from zumble-zay-secrets/AI_TOKEN at startup.
-	# Unlike SESSION_SECRET/CONTROL_PLANE_TOKEN, this key cannot be generated — it is
+	# Unlike SESSION_SECRET, this key cannot be generated — it is
 	# a real provider credential. A missing key hard-fails the gateway pod
 	# (CreateContainerConfigError), which drops every runtime to the stub ranker.
 	# Seed it from $$AI_TOKEN when exported (idempotent — patched in even on a

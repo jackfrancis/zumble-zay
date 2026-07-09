@@ -90,13 +90,15 @@ func loopbackBaseURL(addr string) string {
 // the co-located orchestrator (a no-op for the remote client).
 func buildControlClient(cfg *config.Config, log *slog.Logger) (controlplane.Client, func(), error) {
 	if cfg.ControlPlaneURL != "" {
-		httpClient := &http.Client{Timeout: 10 * time.Second}
-		if cfg.ControlPlaneTokenPath != "" {
-			log.Info("using remote control plane with projected ServiceAccount identity", "url", cfg.ControlPlaneURL)
-			return controlplane.NewHTTPWithTokenSource(cfg.ControlPlaneURL, httpClient, fileTokenSource(cfg.ControlPlaneTokenPath)), func() {}, nil
+		// The web tier authenticates to the orchestrator with its own projected
+		// ServiceAccount token (docs/adr/0031, 0034) — there is no shared-secret
+		// fallback, so the token path is required.
+		if cfg.ControlPlaneTokenPath == "" {
+			return nil, nil, fmt.Errorf("remote control plane requires CONTROL_PLANE_TOKEN_PATH (a projected ServiceAccount token)")
 		}
-		log.Info("using remote control plane", "url", cfg.ControlPlaneURL)
-		return controlplane.NewHTTP(cfg.ControlPlaneURL, httpClient, cfg.ControlPlaneToken), func() {}, nil
+		httpClient := &http.Client{Timeout: 10 * time.Second}
+		log.Info("using remote control plane with projected ServiceAccount identity", "url", cfg.ControlPlaneURL)
+		return controlplane.NewHTTP(cfg.ControlPlaneURL, httpClient, fileTokenSource(cfg.ControlPlaneTokenPath)), func() {}, nil
 	}
 	if len(cfg.MintPrivateKey) == 0 {
 		return nil, nil, fmt.Errorf("co-located control plane needs a signing key: set CONTROL_PLANE_URL to use a remote orchestrator, or unset MINT_PUBLIC_KEY")

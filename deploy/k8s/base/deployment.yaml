@@ -48,6 +48,16 @@ spec:
             # launcher RBAC and no Kubernetes client.
             - name: CONTROL_PLANE_URL
               value: http://zumble-zay-orchestrator:8090
+            # The web tier authenticates to the orchestrator's control API with its
+            # own projected ServiceAccount token, validated by TokenReview — there is
+            # no shared secret (docs/adr/0031, 0034). It re-reads the token from this
+            # path per request as the kubelet rotates it.
+            - name: CONTROL_PLANE_TOKEN_PATH
+              value: /var/run/secrets/zumble-zay/control/token
+          volumeMounts:
+            - name: control-token
+              mountPath: /var/run/secrets/zumble-zay/control
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -73,3 +83,15 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        # The web tier's control-plane identity: a ServiceAccount token minted for
+        # the orchestrator's audience, which the orchestrator validates via
+        # TokenReview (docs/adr/0031, 0034). The kubelet rotates it in place; the
+        # app re-reads it from the mount per request.
+        - name: control-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: zumble-zay-orchestrator
+                  expirationSeconds: 3600

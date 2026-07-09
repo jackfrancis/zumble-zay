@@ -16,7 +16,6 @@ package controlplane
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,28 +106,22 @@ func (l *Local) RedeemTicket(_ context.Context, ticket string) (string, int, err
 }
 
 // HTTP is the remote control client: it calls the orchestrator's control API. It
-// presents a bearer on every request, because the API triggers privileged spawns
-// even though it is cluster-internal. The bearer is read from a token source per
-// request so a rotating credential (a projected ServiceAccount token) stays
-// current (docs/adr/0031).
+// presents its own Kubernetes workload identity — a projected ServiceAccount
+// token — as a bearer on every request, because the API triggers privileged
+// spawns even though it is cluster-internal. The token is read from a source per
+// request so the credential the kubelet rotates in place stays current
+// (docs/adr/0031, 0034).
 type HTTP struct {
 	baseURL string
 	client  *http.Client
 	token   func() (string, error)
 }
 
-// NewHTTP builds a remote control client targeting the orchestrator at baseURL
-// with a static bearer token. A nil client gets http.DefaultClient.
-func NewHTTP(baseURL string, client *http.Client, token []byte) *HTTP {
-	static := string(token)
-	return NewHTTPWithTokenSource(baseURL, client, func() (string, error) { return static, nil })
-}
-
-// NewHTTPWithTokenSource builds a remote control client that reads its bearer from
-// source on every request. Use it for a rotating credential — a projected
-// ServiceAccount token that kubelet refreshes in place (docs/adr/0031) — so a
-// long-lived web tier always presents a currently-valid token.
-func NewHTTPWithTokenSource(baseURL string, client *http.Client, source func() (string, error)) *HTTP {
+// NewHTTP builds a remote control client targeting the orchestrator at baseURL.
+// source supplies the caller's bearer — a projected ServiceAccount token — on
+// every request, so the kubelet-rotated credential is always presented current
+// (docs/adr/0031, 0034). A nil client gets http.DefaultClient.
+func NewHTTP(baseURL string, client *http.Client, source func() (string, error)) *HTTP {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -234,10 +227,11 @@ func (h *HTTP) do(ctx context.Context, method, path string, body any) (*http.Res
 }
 
 // Handler serves the orchestrator's control API. It authenticates every request
-// through a CallerAuthenticator — the shared control bearer by default, a
-// per-service caller identity in production (docs/adr/0031) — then maps it to the
-// wrapped Controller. It registers its routes on a caller-supplied mux so the
-// orchestrator binary can add its own health endpoint alongside.
+// through a CallerAuthenticator — the caller's per-service Kubernetes workload
+// identity, a projected ServiceAccount token validated by TokenReview
+// (docs/adr/0031, 0034) — then maps it to the wrapped Controller. It registers
+// its routes on a caller-supplied mux so the orchestrator binary can add its own
+// health endpoint alongside.
 type Handler struct {
 	c      Controller
 	issuer TokenIssuer
@@ -245,22 +239,15 @@ type Handler struct {
 	log    *slog.Logger
 }
 
-// NewHandler builds the control API handler over c. By default every route is
-// authenticated with the shared control bearer (token); WithCaller swaps in a
-// per-service caller identity (docs/adr/0031).
-func NewHandler(c Controller, token []byte, log *slog.Logger) *Handler {
-	return &Handler{c: c, caller: NewBearerCallerAuthenticator(token), log: log}
-}
-
-// WithCaller overrides how every control request is authenticated. The default
-// (NewHandler) is the shared control bearer; production wires a per-service caller
-// identity — a projected ServiceAccount token validated by TokenReview, typically
-// chained with the bearer as a migration fallback (docs/adr/0031).
-func (h *Handler) WithCaller(caller CallerAuthenticator) *Handler {
-	if caller != nil {
-		h.caller = caller
+// NewHandler builds the control API handler over c. Every route is authenticated
+// by caller — the caller's per-service Kubernetes workload identity (docs/adr/0031,
+// 0034). A nil caller denies every request (fail closed): the control API must
+// never run open.
+func NewHandler(c Controller, caller CallerAuthenticator, log *slog.Logger) *Handler {
+	if caller == nil {
+		caller = denyAllCaller{}
 	}
-	return h
+	return &Handler{c: c, caller: caller, log: log}
 }
 
 // WithTokenExchange enables the token-exchange endpoint (docs/adr/0024): a caller
@@ -365,8 +352,8 @@ func (h *Handler) complete(w http.ResponseWriter, r *http.Request) {
 // issued for (docs/adr/0029), the orchestrator half of the web tier's POST
 // /agent/token. The ticket is the authorization — single-use, and the
 // orchestrator issues exactly one per dispatched job — so this sits behind the
-// shared control bearer like the other trigger routes; the web tier is the only
-// caller. A failed redemption is coarse (unknown, spent, and expired are
+// same per-service caller identity as the other trigger routes; the web tier is
+// the only caller. A failed redemption is coarse (unknown, spent, and expired are
 // indistinguishable) so it reveals nothing.
 func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 	var req ticketRequest
@@ -401,9 +388,10 @@ func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) exchange(w http.ResponseWriter, r *http.Request) {
 	// auth has already authenticated the caller and placed it on the context.
 	caller, _ := callerFrom(r.Context())
-	// A trusted control-plane caller may request a token for any acting user, as
-	// the orchestrator's own dispatch path does. A future per-service authenticator
-	// would set Trusted false and carry a constrained authority.
+	// A trusted control-plane caller (the allow-listed web tier, validated by
+	// TokenReview) may request a token for any acting user, as the orchestrator's
+	// own dispatch path does. A narrower per-service identity would set Trusted
+	// false and carry a constrained authority.
 	if !caller.Trusted {
 		http.Error(w, "caller not permitted to request job tokens", http.StatusForbidden)
 		return
@@ -456,15 +444,6 @@ func (h *Handler) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func bearer(r *http.Request) string {
-	const prefix = "Bearer "
-	h := r.Header.Get("Authorization")
-	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
-		return h[len(prefix):]
-	}
-	return ""
-}
-
 func decode(w http.ResponseWriter, r *http.Request) (request, bool) {
 	var req request
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
@@ -500,42 +479,32 @@ type TokenIssuer interface {
 	MintJobToken(jobType, actingUser string) (token string, expiresIn time.Duration, err error)
 }
 
-// Caller is the authenticated identity of a token-exchange client.
+// Caller is the authenticated identity of a control-plane client.
 type Caller struct {
-	// Subject identifies the caller (a service-runtime identity, or
-	// "control-plane" for the default shared-bearer authenticator).
+	// Subject identifies the caller — its ServiceAccount username as validated by
+	// TokenReview (e.g. "system:serviceaccount:zumble-zay:zumble-zay").
 	Subject string
 	// Trusted means the caller may request a token for any acting user, as the
-	// orchestrator's own dispatch path does. A per-service authenticator would
+	// orchestrator's own dispatch path does. A narrower per-service identity would
 	// set this false and carry a constrained authority instead.
 	Trusted bool
 }
 
-// CallerAuthenticator authenticates a token-exchange request (docs/adr/0024).
-// The default validates the shared control-plane bearer; a production deployment
-// swaps in one that validates the caller's own platform identity (e.g. a
-// projected ServiceAccount OIDC token carried in the request's subject_token).
+// CallerAuthenticator authenticates a control-plane request by the caller's own
+// platform identity: a projected ServiceAccount token validated by TokenReview
+// (docs/adr/0031, 0034). internal/controlauth implements it and is injected into
+// NewHandler, so this package holds no Kubernetes client (docs/adr/0023).
 type CallerAuthenticator interface {
 	Authenticate(r *http.Request) (Caller, error)
 }
 
-// NewBearerCallerAuthenticator authenticates a caller by the shared control-plane
-// bearer — the same trust boundary as the trigger routes. It is the default
-// until a per-service identity authenticator is wired.
-// TODO(team): validate a platform OIDC subject_token instead, so each service
-// runtime carries its own constrained identity rather than a shared secret.
-func NewBearerCallerAuthenticator(token []byte) CallerAuthenticator {
-	return bearerCaller{token: token}
-}
+// denyAllCaller rejects every request. It is the fail-closed default when a
+// Handler is built without an authenticator, so a misconfiguration never leaves
+// the control API open.
+type denyAllCaller struct{}
 
-type bearerCaller struct{ token []byte }
-
-func (a bearerCaller) Authenticate(r *http.Request) (Caller, error) {
-	presented := bearer(r)
-	if len(a.token) == 0 || subtle.ConstantTimeCompare([]byte(presented), a.token) != 1 {
-		return Caller{}, errUnauthorizedCaller
-	}
-	return Caller{Subject: "control-plane", Trusted: true}, nil
+func (denyAllCaller) Authenticate(*http.Request) (Caller, error) {
+	return Caller{}, errUnauthorizedCaller
 }
 
 var errUnauthorizedCaller = errors.New("controlplane: unauthorized caller")
@@ -549,33 +518,12 @@ func callerFrom(ctx context.Context) (Caller, bool) {
 	return c, ok
 }
 
-// NewChainCallerAuthenticator tries each authenticator in order and returns the
-// first success; if all fail it returns the last error. It layers a per-service
-// identity (TokenReview) over the shared-bearer fallback during migration
-// (docs/adr/0031).
-func NewChainCallerAuthenticator(authenticators ...CallerAuthenticator) CallerAuthenticator {
-	return chainCaller(authenticators)
-}
-
-type chainCaller []CallerAuthenticator
-
-func (cc chainCaller) Authenticate(r *http.Request) (Caller, error) {
-	err := error(errUnauthorizedCaller)
-	for _, a := range cc {
-		var caller Caller
-		if caller, err = a.Authenticate(r); err == nil {
-			return caller, nil
-		}
-	}
-	return Caller{}, err
-}
-
 type tokenRequest struct {
 	JobType    string `json:"job_type"`
 	ActingUser string `json:"acting_user"`
-	// SubjectToken is the caller's own identity token (RFC 8693). The default
-	// bearer authenticator ignores it; a platform-OIDC authenticator validates
-	// it. TODO(team): wire real subject-token validation.
+	// SubjectToken is the caller's own identity token (RFC 8693). The caller is
+	// authenticated by its projected ServiceAccount token in the Authorization
+	// header (TokenReview); this field is reserved for a future on-behalf-of flow.
 	SubjectToken string `json:"subject_token,omitempty"`
 }
 

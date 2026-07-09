@@ -37,13 +37,14 @@ subjects:
   - kind: ServiceAccount
     name: zumble-zay-orchestrator
 ---
-# Optional per-service caller identity for the control API (docs/adr/0031). When
-# CONTROL_PLANE_AUDIENCE is set, the orchestrator validates the web tier's
-# projected ServiceAccount token via the TokenReview API, which requires the
-# built-in system:auth-delegator ClusterRole (create on tokenreviews /
-# subjectaccessreviews). This is read-only auth delegation — NOT spawn power — and
-# is unused until CONTROL_PLANE_AUDIENCE is set (the dev overlay turns it on).
-# Harmless when unused.
+# Per-service caller identity for the control API (docs/adr/0031, 0034). The
+# orchestrator authenticates every control caller by its Kubernetes workload
+# identity: it validates the web tier's projected ServiceAccount token via the
+# TokenReview API, which requires the built-in system:auth-delegator ClusterRole
+# (create on tokenreviews / subjectaccessreviews). This is read-only auth
+# delegation — NOT spawn power. It is required in every environment now that the
+# control API has no shared-secret fallback (CONTROL_PLANE_AUDIENCE is set in the
+# base config).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

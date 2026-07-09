@@ -13,6 +13,14 @@ data:
   # The Ingress terminates TLS, so the Secure cookie flag must be set.
   COOKIE_SECURE: "true"
   MICROSOFT_TENANT: "common"
+  # Per-service caller identity for the control API (docs/adr/0031, 0034), read by
+  # the ORCHESTRATOR. It authenticates every control caller by its Kubernetes
+  # workload identity: the web tier presents a projected ServiceAccount token
+  # minted for CONTROL_PLANE_AUDIENCE, and the orchestrator validates it via
+  # TokenReview and checks the caller SA against CONTROL_PLANE_CALLERS. There is no
+  # shared-secret fallback. Harmless on the web tier, which does not read them.
+  CONTROL_PLANE_AUDIENCE: "zumble-zay-orchestrator"
+  CONTROL_PLANE_CALLERS: "system:serviceaccount:zumble-zay:zumble-zay"
   # Agent-runtime substrate: how the orchestrator launches agent jobs. The swap
   # is config-only (ADR 0012). Consumed by the ORCHESTRATOR Deployment, not the
   # web tier (docs/adr/0023). "k8s-job" runs each agent job as a Kubernetes Job

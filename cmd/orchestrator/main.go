@@ -48,10 +48,12 @@ func main() {
 		log.Error("orchestrator requires a signing key: set MINT_PRIVATE_KEY, or SESSION_SECRET without MINT_PUBLIC_KEY")
 		os.Exit(1)
 	}
-	// The control API triggers privileged spawns, so it must be authenticated.
-	// Fail closed rather than serve it open.
-	if len(cfg.ControlPlaneToken) == 0 {
-		log.Error("orchestrator requires CONTROL_PLANE_TOKEN to authenticate the control API")
+	// The control API triggers privileged spawns, so it must authenticate every
+	// caller by its own Kubernetes workload identity (docs/adr/0031, 0034). Fail
+	// closed rather than serve it open: require the audience the caller's projected
+	// ServiceAccount token must be minted for.
+	if cfg.ControlPlaneAudience == "" {
+		log.Error("orchestrator requires CONTROL_PLANE_AUDIENCE to authenticate the control API (per-service TokenReview identity)")
 		os.Exit(1)
 	}
 
@@ -71,23 +73,17 @@ func main() {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	// The control API: the web tier's trigger routes plus the token-exchange
-	// endpoint (docs/adr/0024). Every route is authenticated through the handler's
-	// CallerAuthenticator. With CONTROL_PLANE_AUDIENCE set, that is per-service
-	// Kubernetes workload identity — a projected ServiceAccount token validated by
-	// TokenReview — chained over the shared bearer as a migration fallback
-	// (docs/adr/0031); otherwise it is the shared bearer alone.
-	control := controlplane.NewHandler(orch, cfg.ControlPlaneToken, log)
-	if cfg.ControlPlaneAudience != "" {
-		tr, err := controlauth.Build(cfg.ControlPlaneAudience, cfg.ControlPlaneCallers, log)
-		if err != nil {
-			log.Error("control-plane caller identity setup failed", "err", err)
-			os.Exit(1)
-		}
-		control = control.WithCaller(controlplane.NewChainCallerAuthenticator(
-			tr, controlplane.NewBearerCallerAuthenticator(cfg.ControlPlaneToken)))
-		log.Info("control API: per-service caller identity enabled", "audience", cfg.ControlPlaneAudience)
+	// endpoint (docs/adr/0024). Every route is authenticated by the caller's own
+	// per-service Kubernetes workload identity — a projected ServiceAccount token
+	// validated by TokenReview against the configured audience and caller allowlist
+	// (docs/adr/0031, 0034). There is no shared-secret fallback.
+	caller, err := controlauth.Build(cfg.ControlPlaneAudience, cfg.ControlPlaneCallers, log)
+	if err != nil {
+		log.Error("control-plane caller identity setup failed", "err", err)
+		os.Exit(1)
 	}
-	control.WithTokenExchange(orch).Register(mux)
+	log.Info("control API: per-service caller identity enabled", "audience", cfg.ControlPlaneAudience)
+	controlplane.NewHandler(orch, caller, log).WithTokenExchange(orch).Register(mux)
 
 	srv := &http.Server{
 		Addr:              cfg.ControlPlaneAddr,
