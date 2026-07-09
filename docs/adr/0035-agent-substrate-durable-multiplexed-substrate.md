@@ -166,15 +166,26 @@ seam, not in ZZ core.
   — ZZ runs a job to completion, then goes idle — so a suspend never freezes an
   in-flight outbound call to GitHub or the model.
 
-- **Activation prerequisites are heavy (the EXPERIMENTAL cost).** A full
-  `ate-system` (the actor gRPC API, the `atelet` DaemonSet, the controller, the
-  `atenet` router/DNS, the gVisor runtime bits), gVisor `runsc`, an object store
-  for snapshots (GCS, or an in-cluster store in kind), a `WorkerPool`, the
-  `kubectl-ate` plugin, and the project's `ko`-based build. `LAUNCHER=substrate make
-  dev-up` clones Substrate at a pinned ref, invokes its kind installer best-effort,
-  loads the `runtime-a2a` image, applies the pool/template, creates the actor, and
-  points the orchestrator at the router — but this is a moving v0.0.0 target and is
-  expected to need per-cluster tuning (as 0027 is).
+- **Activation prerequisites are heavy, and the cluster itself is special (the
+  EXPERIMENTAL cost).** Unlike every other substrate, Substrate cannot run on ZZ's
+  ordinary dev cluster: its `podcertcontroller` (the mTLS-identity signer the whole
+  `ate-system` depends on) needs **create-time** apiserver feature gates —
+  `ClusterTrustBundle`, `ClusterTrustBundleProjection`, `PodCertificateRequest`,
+  plus the `certificates.k8s.io/v1beta1` `runtimeConfig`, on a ≥1.36 node image —
+  that cannot be added to a running cluster. And `ate-system` has **no published
+  images** (every component, including the `ateom` herder a `WorkerPool` names, is
+  `ko://`-built from source), so it cannot be `kubectl apply`-ed from a URL like the
+  agent-sandbox/kube-network-policies installs. Both facts force the bring-up to be
+  "clone Substrate and drive its own gated-kind + `ko` installer." So
+  `LAUNCHER=substrate make dev-up` resolves `cluster-up` to a `substrate-cluster`
+  target that **deletes and recreates** the kind cluster via Substrate's
+  `hack/create-kind-cluster.sh` (feature gates, local registry, gVisor, proxy-ARP)
+  + `hack/install-ate-kind.sh --deploy-ate-system` (control plane, `rustfs`/`valkey`,
+  `atelet`); the dev-up substrate branch then pushes the `runtime-a2a` actor image
+  to that registry as a digest, `ko`-resolves the `ateom` herder, and applies the
+  pool/template + atespace/actor against the in-cluster `rustfs` snapshot bucket. It
+  requires `docker` (Substrate's scripts assume it), `go`, and `git`, is pinned to a
+  moving v0.0.0 ref, and is expected to need per-cluster tuning (as 0027 is).
 
 - **The north-star follow-up is identity composition.** Substrate ships a native
   **`SessionIdentity`** service (`MintJWT` — an OIDC JWT identifying the actor;

@@ -4,7 +4,7 @@
         build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer \
         image-runtime-shell image-runtime-shell-save kind-load-runtime-shell opensandbox-install \
         image-runtime-a2a image-runtime-a2a-save kind-load-runtime-a2a kagent-install \
-        substrate-install
+        substrate-install substrate-cluster
 
 BIN := bin/server
 
@@ -80,13 +80,19 @@ RUNTIME_A2A_IMAGE ?= localhost/zumble-zay-runtime-a2a:dev
 KAGENT_VERSION ?= 0.9.11
 KAGENT_NAMESPACE ?= kagent
 
-# Agent Substrate (LAUNCHER=substrate) dev-install knobs — all overridable
-# (docs/adr/0035). EXPERIMENTAL: Substrate is v0.0.0 and needs a full ate-system
-# (gVisor, object store, a WorkerPool, kubectl-ate) that `make substrate-install`
-# does NOT stand up — it applies ZZ's pool/template/actor against an EXISTING
-# ate-system and points the orchestrator at the atenet-router. The actor reuses the
-# cmd/runtime-a2a image, served on :80. Cross-namespace FQDNs because the actor
-# runs in ate-land, not the web tier's namespace (cf. opensandbox, ADR 0027).
+# Agent Substrate (LAUNCHER=substrate) dev knobs — all overridable (docs/adr/0035).
+# EXPERIMENTAL: Substrate is v0.0.0. `LAUNCHER=substrate make dev-up` bootstraps the
+# whole thing — cluster-up resolves to substrate-cluster, which clones Substrate at
+# SUBSTRATE_REF and runs ITS gated-kind + ate-system installer (a feature-gated
+# cluster is required, and its images are ko-built, so there is nothing to `kubectl
+# apply`). The dev-up substrate branch then pushes the runtime-a2a actor image to the
+# in-cluster registry as a digest, ko-resolves the ateom herder, and substrate-install
+# applies ZZ's pool/template/actor against that ate-system. The actor reuses the
+# cmd/runtime-a2a image, served on :80. Cross-namespace FQDNs because the actor runs
+# in ate-land, not the web tier's namespace (cf. opensandbox, ADR 0027).
+SUBSTRATE_REF ?= main
+SUBSTRATE_CLONE_DIR := build/substrate
+SUBSTRATE_REGISTRY ?= localhost:5001
 SUBSTRATE_NAMESPACE ?= zumble-zay-substrate
 SUBSTRATE_ATESPACE ?= zumble-zay
 SUBSTRATE_ACTOR ?= zz-runtime
@@ -339,14 +345,49 @@ kind-load-orchestrator: image-orchestrator-save
 	kind load image-archive zumble-zay-orchestrator-image.tar --name $(KIND_CLUSTER)
 	rm -f zumble-zay-orchestrator-image.tar
 
-# Create the kind cluster if it does not already exist.
+# Create the kind cluster if it does not already exist. For LAUNCHER=substrate the
+# cluster must be feature-gated at creation AND carry the full ate-system (see
+# substrate-cluster), so cluster-up resolves to that heavy bring-up; every other
+# launcher gets a plain kind cluster.
+ifeq ($(LAUNCHER),substrate)
+cluster-up: substrate-cluster
+else
 cluster-up:
 	@command -v kind >/dev/null || { echo "kind not installed (https://kind.sigs.k8s.io)"; exit 1; }
 	@kind get clusters 2>/dev/null | grep -qx $(KIND_CLUSTER) || kind create cluster --name $(KIND_CLUSTER)
+endif
 
 # Delete the kind cluster.
 cluster-down:
 	-kind delete cluster --name $(KIND_CLUSTER)
+
+# EXPERIMENTAL (docs/adr/0035): stand up a feature-gated kind cluster + the full
+# ate-system so LAUNCHER=substrate has a substrate to run on. Agent Substrate needs
+# CREATE-TIME apiserver feature gates (ClusterTrustBundle, ClusterTrustBundleProjection,
+# PodCertificateRequest + the certificates.k8s.io/v1beta1 runtimeConfig) that cannot
+# be added to a running cluster, and its control-plane images are ko-built from source
+# (no published images), so bootstrapping = cloning Substrate and driving ITS kind
+# scripts. cluster-up delegates here for LAUNCHER=substrate, so this runs as part of
+# `LAUNCHER=substrate make dev-up`. It DELETES and recreates the '$(KIND_CLUSTER)'
+# cluster and requires docker (Substrate's scripts assume docker), go, and git.
+# Pinned to SUBSTRATE_REF (a v0.0.0 moving target).
+substrate-cluster:
+	@command -v docker >/dev/null || { echo "docker required (Agent Substrate's kind scripts assume docker, not podman)"; exit 1; }
+	@command -v go >/dev/null || { echo "go required (ate-system is ko-built from source)"; exit 1; }
+	@command -v git >/dev/null || { echo "git required"; exit 1; }
+	@echo "EXPERIMENTAL: recreating the '$(KIND_CLUSTER)' kind cluster with the Agent Substrate feature"
+	@echo "             gates + the full ate-system (gVisor, rustfs, valkey, atenet, atelet)."
+	@echo "             This DELETES the existing '$(KIND_CLUSTER)' cluster (feature gates are create-time)."
+	rm -rf $(SUBSTRATE_CLONE_DIR)
+	git clone --depth 1 --branch $(SUBSTRATE_REF) https://github.com/agent-substrate/substrate $(SUBSTRATE_CLONE_DIR)
+	cd $(SUBSTRATE_CLONE_DIR) && KIND_CLUSTER_NAME=$(KIND_CLUSTER) ./hack/create-kind-cluster.sh
+	cd $(SUBSTRATE_CLONE_DIR) && KIND_CLUSTER_NAME=$(KIND_CLUSTER) KUBECTL_CONTEXT=kind-$(KIND_CLUSTER) ./hack/install-ate-kind.sh --deploy-ate-system
+	# Install the kubectl-ate plugin from the same checkout so substrate-install can
+	# create the atespace + actor. Without it the WorkerPool/ActorTemplate still apply,
+	# but no actor exists for the router to route to and every ZZ job fails to dispatch.
+	# Lands in $$(go env GOPATH)/bin (must be on PATH for the `command -v kubectl-ate` check).
+	@echo "installing the kubectl-ate plugin (go install ./cmd/kubectl-ate)"
+	cd $(SUBSTRATE_CLONE_DIR) && go install ./cmd/kubectl-ate
 
 # One shot: build the images from the current source, stand up a kind cluster,
 # load them, deploy the dev overlay, and wait until both tiers are ready. Three
@@ -422,20 +463,32 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 		echo "loading A2A runtime image + installing the kagent control plane"; \
 		$(MAKE) kind-load-runtime-a2a kagent-install; \
 	fi
-	# Optional Agent Substrate substrate (docs/adr/0035): apply the ZZ actor into an
-	# existing ate-system so the orchestrator has an actor to dispatch to. Only when
-	# selected. EXPERIMENTAL — substrate-install does not stand up ate-system itself.
+	# Optional Agent Substrate substrate (docs/adr/0035): the cluster + ate-system
+	# were bootstrapped by cluster-up (substrate-cluster). Now make ZZ's actor real on
+	# it — push the runtime-a2a image to the ate-system registry as a DIGEST (the
+	# ActorTemplate rejects unpinned images), resolve the gVisor ateom herder via
+	# Substrate's ko, and apply the WorkerPool/ActorTemplate + atespace/actor against
+	# the in-cluster rustfs snapshot bucket. Only when selected. EXPERIMENTAL.
 	@if [ "$(LAUNCHER)" = "substrate" ]; then \
-		echo "installing the ZZ Agent Substrate actor (experimental)"; \
-		$(MAKE) substrate-install; \
+		echo "pushing the runtime-a2a actor image to the ate-system registry ($(SUBSTRATE_REGISTRY))"; \
+		docker build -f Dockerfile.runtime-a2a -t $(SUBSTRATE_REGISTRY)/zumble-zay-runtime-a2a:dev . && \
+		docker push $(SUBSTRATE_REGISTRY)/zumble-zay-runtime-a2a:dev && \
+		actor_img=$$(docker inspect --format '{{index .RepoDigests 0}}' $(SUBSTRATE_REGISTRY)/zumble-zay-runtime-a2a:dev) && \
+		echo "resolving the gVisor ateom herder image via Substrate's ko" && \
+		ateom_img=$$(cd $(SUBSTRATE_CLONE_DIR) && KO_DOCKER_REPO=$(SUBSTRATE_REGISTRY) KO_DEFAULTPLATFORMS=linux/$$(go env GOARCH) ./hack/run-tool.sh ko build --base-import-paths --push ./cmd/ateom-gvisor) && \
+		$(MAKE) substrate-install SUBSTRATE_RUNTIME_IMAGE=$$actor_img SUBSTRATE_ATEOM_IMAGE=$$ateom_img SUBSTRATE_SNAPSHOT_LOCATION=gs://ate-snapshots/zz-runtime/; \
 	fi
 	# Enforce the base NetworkPolicy in dev (docs/adr/0033): the orchestrator ships
 	# a default-deny control-API policy, but kindnet ignores NetworkPolicy, so
 	# install the kube-network-policies controller to make it live. Best-effort —
 	# the policy is defense-in-depth over the auth controls (docs/adr/0031, 0032)
 	# and fail-open, so a transient install failure degrades to the pre-0033 kindnet
-	# behavior rather than blocking the dev loop. Skip with an empty version.
-	@if [ -n "$(KUBE_NETWORK_POLICIES_VERSION)" ]; then \
+	# behavior rather than blocking the dev loop. Skip with an empty version; also
+	# skipped for LAUNCHER=substrate, whose ate-system runs its own cluster networking
+	# (atenet: Envoy + nftables), which a second nftables controller can fight.
+	@if [ "$(LAUNCHER)" = "substrate" ]; then \
+		echo "skipping kube-network-policies on the substrate cluster (ate's atenet owns cluster networking; a second nftables controller can conflict)"; \
+	elif [ -n "$(KUBE_NETWORK_POLICIES_VERSION)" ]; then \
 		echo "installing kube-network-policies $(KUBE_NETWORK_POLICIES_VERSION) (enforces NetworkPolicy on kindnet)"; \
 		kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/kube-network-policies/$(KUBE_NETWORK_POLICIES_VERSION)/install.yaml \
 			|| echo "WARNING: kube-network-policies install failed; the orchestrator NetworkPolicy stays unenforced in dev (defense-in-depth only, not a blocker)"; \
