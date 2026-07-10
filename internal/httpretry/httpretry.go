@@ -8,7 +8,11 @@
 // connection-phase failure (DNS or dial — the request never reached the server)
 // and a 429 (rate-limited — refused, not processed) are retried for any method,
 // while a mid-flight error or a 502/503/504 is retried only for an idempotent
-// method. A 429's Retry-After header is honored (capped) as the backoff.
+// method. A 429 is retried on its own, more patient budget (more attempts, a
+// longer backoff) than a connection blip — the endpoint refused the request and
+// a job has minutes of budget, so riding out a short rate-limit window beats
+// failing the whole job — and its Retry-After header is honored (capped) as the
+// backoff.
 package httpretry
 
 import (
@@ -23,11 +27,22 @@ import (
 	"time"
 )
 
-// Default retry policy: a few attempts with jittered exponential backoff.
+// Default retry policy for a transient failure (a connection blip or an
+// idempotent 5xx): a few attempts with jittered exponential backoff.
 const (
 	DefaultAttempts    = 3
 	DefaultBaseBackoff = 200 * time.Millisecond
 	DefaultMaxBackoff  = 2 * time.Second
+)
+
+// Default retry policy for a 429 (rate limit): more attempts and a longer
+// backoff than a connection blip. The endpoint refused the request and a job
+// has minutes of budget, so riding out a short rate-limit window beats failing
+// the whole job; the request context / client Timeout still bounds the total.
+const (
+	DefaultRateLimitAttempts    = 8
+	DefaultRateLimitBaseBackoff = 1 * time.Second
+	DefaultRateLimitMaxBackoff  = maxRetryAfter
 )
 
 // maxRetryAfter caps how long a Retry-After header can make one request wait, so
@@ -39,12 +54,21 @@ const maxRetryAfter = 30 * time.Second
 // failures with the default policy. A nil client gets a fresh one; an
 // already-wrapped client is returned unchanged, so calling it twice is safe.
 func Wrap(c *http.Client) *http.Client {
-	return WrapN(c, DefaultAttempts, DefaultBaseBackoff, DefaultMaxBackoff)
+	return wrap(c,
+		DefaultAttempts, DefaultBaseBackoff, DefaultMaxBackoff,
+		DefaultRateLimitAttempts, DefaultRateLimitBaseBackoff, DefaultRateLimitMaxBackoff)
 }
 
-// WrapN is Wrap with explicit knobs (tests use a tiny backoff). attempts < 1
-// collapses to a single try.
+// WrapN is Wrap with explicit knobs applied uniformly to both the transient and
+// the rate-limit retry path (tests use a tiny backoff). attempts < 1 collapses
+// to a single try.
 func WrapN(c *http.Client, attempts int, base, max time.Duration) *http.Client {
+	return wrap(c, attempts, base, max, attempts, base, max)
+}
+
+// wrap installs the retry transport with distinct transient and rate-limit
+// budgets. It preserves an already-wrapped client and the client's other fields.
+func wrap(c *http.Client, attempts int, base, max time.Duration, rlAttempts int, rlBase, rlMax time.Duration) *http.Client {
 	if c == nil {
 		c = &http.Client{}
 	}
@@ -56,50 +80,89 @@ func WrapN(c *http.Client, attempts int, base, max time.Duration) *http.Client {
 		return c
 	}
 	clone := *c // preserve Timeout, CheckRedirect, Jar; only swap the transport
-	clone.Transport = &transport{base: rt, attempts: attempts, baseBackoff: base, maxBackoff: max}
+	clone.Transport = &transport{
+		base:        rt,
+		attempts:    attempts,
+		baseBackoff: base,
+		maxBackoff:  max,
+		rlAttempts:  rlAttempts,
+		rlBase:      rlBase,
+		rlMax:       rlMax,
+	}
 	return &clone
 }
 
 // transport wraps a base RoundTripper with the bounded retry policy.
 type transport struct {
-	base        http.RoundTripper
+	base http.RoundTripper
+
+	// transient path: connection-phase errors and idempotent 5xx.
 	attempts    int
 	baseBackoff time.Duration
 	maxBackoff  time.Duration
+
+	// rate-limit path: a 429 gets a more patient, separate budget.
+	rlAttempts int
+	rlBase     time.Duration
+	rlMax      time.Duration
 }
 
-// RoundTrip sends req, retrying transient failures up to attempts times. The
-// whole loop runs inside one Client.Do call, so the client's Timeout (and the
-// request context deadline) bound all attempts and backoffs together.
+// RoundTrip sends req, retrying transient failures and rate limits on separate
+// budgets. The whole loop runs inside one Client.Do call, so the client's
+// Timeout (and the request context deadline) bound all attempts and backoffs
+// together.
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	attempts := t.attempts
-	if attempts < 1 {
-		attempts = 1
+	// Separate budgets: a transient (connection/5xx) failure and a 429 each get
+	// their own retry allowance, so riding out a rate limit does not consume the
+	// connection-blip budget and vice versa.
+	transientLeft := t.attempts - 1
+	if transientLeft < 0 {
+		transientLeft = 0
 	}
+	rateLimitLeft := t.rlAttempts - 1
+	if rateLimitLeft < 0 {
+		rateLimitLeft = 0
+	}
+
 	var (
 		resp *http.Response
 		err  error
 	)
-	for attempt := 0; attempt < attempts; attempt++ {
-		if attempt > 0 {
-			// Rewind the body for a repeat send; if it cannot be rewound, return the
-			// last result rather than send a truncated request.
-			rewound, rerr := rewind(req)
-			if rerr != nil {
-				return resp, err
-			}
-			req = rewound
-			if werr := waitBeforeRetry(req.Context(), resp, t.baseBackoff, t.maxBackoff, attempt); werr != nil {
-				return nil, werr
-			}
-		}
+	for {
 		resp, err = t.base.RoundTrip(req)
-		if attempt == attempts-1 || !shouldRetry(req.Method, resp, err) {
+		if !shouldRetry(req.Method, resp, err) {
 			return resp, err
 		}
-		drain(resp) // let the connection be reused before the next attempt
+
+		// Pick the budget and backoff schedule for this failure reason.
+		var (
+			left      *int
+			total     int
+			base, max time.Duration
+		)
+		if err == nil && resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+			left, total, base, max = &rateLimitLeft, t.rlAttempts, t.rlBase, t.rlMax
+		} else {
+			left, total, base, max = &transientLeft, t.attempts, t.baseBackoff, t.maxBackoff
+		}
+		if *left <= 0 {
+			return resp, err // budget for this failure reason exhausted
+		}
+		attempt := total - *left // 1-based: the first retry is attempt 1
+		*left--
+
+		// Rewind the body for a repeat send; if it cannot be rewound, return the
+		// last result rather than send a truncated request.
+		rewound, rerr := rewind(req)
+		if rerr != nil {
+			return resp, err
+		}
+		req = rewound
+		drain(resp) // let the connection be reused during the backoff
+		if werr := waitBeforeRetry(req.Context(), resp, base, max, attempt); werr != nil {
+			return nil, werr
+		}
 	}
-	return resp, err
 }
 
 // rewind returns req ready to be sent again. A bodyless request (e.g. GET) is
