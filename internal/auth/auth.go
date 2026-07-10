@@ -20,6 +20,7 @@ import (
 	"golang.org/x/oauth2/microsoft"
 
 	"github.com/jackfrancis/zumble-zay/internal/config"
+	"github.com/jackfrancis/zumble-zay/internal/httpretry"
 	"github.com/jackfrancis/zumble-zay/internal/session"
 	"github.com/jackfrancis/zumble-zay/internal/vault"
 )
@@ -49,9 +50,14 @@ type Handler struct {
 // to act on their behalf (ADR 0006).
 func NewHandler(cfg *config.Config, sessions *session.Manager, vlt vault.Vault) *Handler {
 	h := &Handler{
-		sessions:      sessions,
-		providers:     make(map[string]*provider),
-		client:        &http.Client{Timeout: 10 * time.Second},
+		sessions:  sessions,
+		providers: make(map[string]*provider),
+		// Wrap the OAuth client so a transient DNS/egress blip to the provider's
+		// token endpoint (this cluster's CoreDNS has shown "server misbehaving")
+		// retries instead of failing login with "token exchange failed". The retry
+		// only repeats connection-phase failures for the POST exchange (safe: the
+		// request never reached the server), so it cannot double-exchange a code.
+		client:        httpretry.Wrap(&http.Client{Timeout: 10 * time.Second}),
 		vault:         vlt,
 		githubAPIBase: "https://api.github.com",
 	}

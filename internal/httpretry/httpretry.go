@@ -1,4 +1,14 @@
-package agent
+// Package httpretry wraps an http.Client so transient connectivity failures — a
+// flaky cluster DNS resolver, a provider hiccup — are retried instead of failing
+// the call outright. It is shared by the agent runtime (its GitHub/ZZ/model
+// calls) and the web tier's OAuth client (the login token exchange), which would
+// otherwise turn a one-off "server misbehaving" DNS blip into a hard failure.
+//
+// The retry scope is deliberately conservative to avoid duplicating a write: a
+// connection-phase failure (DNS or dial — the request never reached the server)
+// is retried for any method, while a mid-flight error or a 502/503/504 is retried
+// only for an idempotent method.
+package httpretry
 
 import (
 	"context"
@@ -10,39 +20,23 @@ import (
 	"time"
 )
 
-// The runtime's outbound HTTP retry policy. A local cluster's CoreDNS or a
-// provider can hiccup transiently (e.g. `lookup api.github.com: server
-// misbehaving`), and a single blip otherwise fails the whole job — and, because
-// the pipeline chains only on success, stalls the stage after it. A bounded
-// retry with jittered backoff turns that into a sub-second stutter.
-//
-// The scope is deliberately conservative to avoid duplicating a write: a
-// connection-phase failure (DNS or dial — the request never reached the server)
-// is retried for any method, while a mid-flight error or a 502/503/504 is
-// retried only for an idempotent method.
+// Default retry policy: a few attempts with jittered exponential backoff.
 const (
-	retryAttempts    = 3
-	retryBaseBackoff = 200 * time.Millisecond
-	retryMaxBackoff  = 2 * time.Second
+	DefaultAttempts    = 3
+	DefaultBaseBackoff = 200 * time.Millisecond
+	DefaultMaxBackoff  = 2 * time.Second
 )
 
-// retryTransport wraps a base RoundTripper with the bounded retry policy above.
-type retryTransport struct {
-	base        http.RoundTripper
-	attempts    int
-	baseBackoff time.Duration
-	maxBackoff  time.Duration
+// Wrap returns a copy of c whose transport retries transient connectivity
+// failures with the default policy. A nil client gets a fresh one; an
+// already-wrapped client is returned unchanged, so calling it twice is safe.
+func Wrap(c *http.Client) *http.Client {
+	return WrapN(c, DefaultAttempts, DefaultBaseBackoff, DefaultMaxBackoff)
 }
 
-// withRetry returns a copy of c whose transport retries transient connectivity
-// failures per the package policy. A nil client gets a fresh one; an
-// already-wrapped client is returned unchanged, so it is safe to call twice.
-func withRetry(c *http.Client) *http.Client {
-	return wrapRetry(c, retryAttempts, retryBaseBackoff, retryMaxBackoff)
-}
-
-// wrapRetry is withRetry with explicit knobs, so tests can use a tiny backoff.
-func wrapRetry(c *http.Client, attempts int, base, max time.Duration) *http.Client {
+// WrapN is Wrap with explicit knobs (tests use a tiny backoff). attempts < 1
+// collapses to a single try.
+func WrapN(c *http.Client, attempts int, base, max time.Duration) *http.Client {
 	if c == nil {
 		c = &http.Client{}
 	}
@@ -50,18 +44,26 @@ func wrapRetry(c *http.Client, attempts int, base, max time.Duration) *http.Clie
 	if rt == nil {
 		rt = http.DefaultTransport
 	}
-	if _, ok := rt.(*retryTransport); ok {
+	if _, ok := rt.(*transport); ok {
 		return c
 	}
 	clone := *c // preserve Timeout, CheckRedirect, Jar; only swap the transport
-	clone.Transport = &retryTransport{base: rt, attempts: attempts, baseBackoff: base, maxBackoff: max}
+	clone.Transport = &transport{base: rt, attempts: attempts, baseBackoff: base, maxBackoff: max}
 	return &clone
+}
+
+// transport wraps a base RoundTripper with the bounded retry policy.
+type transport struct {
+	base        http.RoundTripper
+	attempts    int
+	baseBackoff time.Duration
+	maxBackoff  time.Duration
 }
 
 // RoundTrip sends req, retrying transient failures up to attempts times. The
 // whole loop runs inside one Client.Do call, so the client's Timeout (and the
 // request context deadline) bound all attempts and backoffs together.
-func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	attempts := t.attempts
 	if attempts < 1 {
 		attempts = 1
@@ -72,8 +74,8 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	)
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
-			// Rewind the body for a repeat send; if it cannot be rewound, return
-			// the last result rather than send a truncated request.
+			// Rewind the body for a repeat send; if it cannot be rewound, return the
+			// last result rather than send a truncated request.
 			rewound, rerr := rewind(req)
 			if rerr != nil {
 				return resp, err
@@ -100,7 +102,7 @@ func rewind(req *http.Request) (*http.Request, error) {
 		return req, nil
 	}
 	if req.GetBody == nil {
-		return nil, errors.New("agent: request body is not rewindable")
+		return nil, errors.New("httpretry: request body is not rewindable")
 	}
 	body, err := req.GetBody()
 	if err != nil {
@@ -160,7 +162,7 @@ func shouldRetry(method string, resp *http.Response, err error) bool {
 
 // isConnectionError reports whether err occurred before the request could be
 // delivered — a DNS failure or a dial/connect failure — so repeating it cannot
-// duplicate a server-side effect. `server misbehaving` is a *net.DNSError.
+// duplicate a server-side effect. "server misbehaving" is a *net.DNSError.
 func isConnectionError(err error) bool {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {

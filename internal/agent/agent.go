@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/github"
+	"github.com/jackfrancis/zumble-zay/internal/httpretry"
 	"github.com/jackfrancis/zumble-zay/internal/llm"
 	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
@@ -104,7 +105,7 @@ func Run(ctx context.Context, p RunParams) error {
 	if p.Client == nil {
 		p.Client = &http.Client{Timeout: 30 * time.Second}
 	}
-	p.Client = withRetry(p.Client)
+	p.Client = httpretry.Wrap(p.Client)
 	// Wrap the job context so the llm chat primitive and the converse tool loop
 	// record model-call timing and tool-use counts into a collector, which the
 	// completion report carries back for per-phase metrics (docs/adr/0024). A
