@@ -563,7 +563,7 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 	fi
 	@echo
 	@echo "zumble-zay is running. Expose it with:  make dev-forward"
-	@echo "then:  curl localhost:8080/healthz"
+	@echo "then:  curl localhost:$(WEB_LOCAL_PORT)/healthz"
 
 # Tear down the whole dev environment.
 dev-down: cluster-down
