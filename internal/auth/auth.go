@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -52,12 +53,13 @@ func NewHandler(cfg *config.Config, sessions *session.Manager, vlt vault.Vault) 
 	h := &Handler{
 		sessions:  sessions,
 		providers: make(map[string]*provider),
-		// Wrap the OAuth client so a transient DNS/egress blip to the provider's
-		// token endpoint (this cluster's CoreDNS has shown "server misbehaving")
-		// retries instead of failing login with "token exchange failed". The retry
-		// only repeats connection-phase failures for the POST exchange (safe: the
-		// request never reached the server), so it cannot double-exchange a code.
-		client:        httpretry.Wrap(&http.Client{Timeout: 10 * time.Second}),
+		// The OAuth client bounds each attempt and retries a transient DNS/egress
+		// blip to the provider (this cluster's CoreDNS has shown "server
+		// misbehaving" and hung /user fetches), so a stalled resolver is abandoned
+		// and retried rather than failing login outright. Connection-phase failures
+		// on the POST exchange are safe to repeat (the request never reached the
+		// server), so a code is never double-exchanged. See loginHTTPClient.
+		client:        loginHTTPClient(),
 		vault:         vlt,
 		githubAPIBase: "https://api.github.com",
 	}
@@ -150,6 +152,26 @@ func NewHandler(cfg *config.Config, sessions *session.Manager, vlt vault.Vault) 
 	return h
 }
 
+// loginHTTPClient builds the HTTP client for the OAuth token exchange and the
+// provider user-info calls. Interactive login runs on a tight budget, so unlike
+// the default transport — which sets no response-header timeout and a long dial
+// timeout, letting a single hung DNS lookup or connection consume the whole
+// budget (observed as a "context deadline exceeded" on the GitHub /user fetch) —
+// this bounds each attempt. With a short per-attempt timeout a stalled resolver
+// or connection is abandoned quickly, so the httpretry wrapper can make a real
+// second attempt (often once CoreDNS recovers) instead of one long hang failing
+// login. The retry policy is the snappy default, not the runtime's patient 429
+// budget: a login should recover in a couple of quick tries or fail fast for the
+// user to retry, never hang on a long backoff.
+func loginHTTPClient() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: 4 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = 4 * time.Second
+	t.ResponseHeaderTimeout = 5 * time.Second
+	return httpretry.WrapN(&http.Client{Timeout: 12 * time.Second, Transport: t},
+		httpretry.DefaultAttempts, httpretry.DefaultBaseBackoff, httpretry.DefaultMaxBackoff)
+}
+
 // Providers returns the names of the enabled providers.
 func (h *Handler) Providers() []string {
 	names := make([]string, 0, len(h.providers))
@@ -207,7 +229,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, h.client)
 
