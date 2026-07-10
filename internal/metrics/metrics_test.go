@@ -13,6 +13,7 @@ func TestObserveJobIsExposed(t *testing.T) {
 	ObserveJob("github-converse", "substrate", OutcomeFailed, 12*time.Second)
 	ObserveQueueWait("github-converse", 200*time.Millisecond)
 	ObserveDispatch("substrate", "github-converse", 900*time.Millisecond)
+	ObserveProvisioning("substrate", "github-converse", 1.2)
 	ObserveRuntimeWork("substrate", "github-converse", 25)
 	ObserveModelSeconds("github-converse", 7)
 	ObserveModelCalls("github-converse", 4)
@@ -31,6 +32,7 @@ func TestObserveJobIsExposed(t *testing.T) {
 		`zz_agent_job_duration_seconds_count{launcher="substrate",outcome="failed",type="github-converse"}`,
 		`zz_agent_job_queue_wait_seconds_count{type="github-converse"}`,
 		`zz_agent_job_dispatch_duration_seconds_count{launcher="substrate",type="github-converse"}`,
+		`zz_agent_job_provisioning_seconds_count{launcher="substrate",type="github-converse"}`,
 		`zz_agent_job_runtime_seconds_count{launcher="substrate",type="github-converse"}`,
 		`zz_agent_job_model_seconds_count{type="github-converse"}`,
 		`zz_agent_job_model_calls_count{type="github-converse"}`,

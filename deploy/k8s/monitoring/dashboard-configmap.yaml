@@ -106,7 +106,8 @@ data:
           ]
         },
         {
-          "title": "Dispatch / provisioning latency by launcher (p90)",
+          "title": "Dispatch call latency by launcher (p90)",
+          "description": "Duration of the orchestrator's own Dispatch call only. For a durable/A2A substrate this is the actor resume + routing; for a pod launcher it is just the create call — the pod's asynchronous cold-start happens AFTER Dispatch returns and is NOT counted here (see the Provisioning panel for the launcher-symmetric number).",
           "type": "timeseries",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
           "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
@@ -161,6 +162,30 @@ data:
           "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "value_and_name"},
           "targets": [
             {"refId": "A", "expr": "(sum by (launcher)(increase(zz_agent_job_duration_seconds_sum{type=\"github-converse\"}[$__range])) / sum by (launcher)(increase(zz_agent_job_duration_seconds_count{type=\"github-converse\"}[$__range]))) - (sum by (launcher)(increase(zz_agent_job_runtime_seconds_sum{type=\"github-converse\"}[$__range])) / sum by (launcher)(increase(zz_agent_job_runtime_seconds_count{type=\"github-converse\"}[$__range])))", "legendFormat": "{{launcher}}"}
+          ]
+        },
+        {
+          "title": "Provisioning latency by launcher (p90) — pod cold-start vs actor resume",
+          "description": "The launcher-symmetric startup cost: dispatch-start to the runtime actually working, measured by the runtime. Unlike the Dispatch panel this INCLUDES a pod launcher's asynchronous cold-start, so agent-sandbox's per-job pod boot and substrate's warm-actor resume are finally comparable like-for-like.",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "histogram_quantile(0.90, sum(rate(zz_agent_job_provisioning_seconds_bucket[$__rate_interval])) by (le, launcher))", "legendFormat": "{{launcher}}"}
+          ]
+        },
+        {
+          "title": "Async boot hidden by Dispatch: provisioning − dispatch (p90)",
+          "description": "provisioning − dispatch per launcher: the startup a pod launcher pays AFTER Dispatch returns (pod schedule + image pull + container start), which the Dispatch metric alone misses. Near zero for a durable substrate (resume happens inside Dispatch); the pod cold-start for agent-sandbox / k8s.",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "histogram_quantile(0.90, sum(rate(zz_agent_job_provisioning_seconds_bucket[$__rate_interval])) by (le, launcher)) - histogram_quantile(0.90, sum(rate(zz_agent_job_dispatch_duration_seconds_bucket[$__rate_interval])) by (le, launcher))", "legendFormat": "{{launcher}}"}
           ]
         }
       ]

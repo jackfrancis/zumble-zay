@@ -1,8 +1,12 @@
 package agent
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestEnvParamsRoundTrip(t *testing.T) {
+	dispatched := time.UnixMilli(1_700_000_000_123)
 	in := RunParams{
 		JobType:       JobEnrich,
 		BaseURL:       "http://zz:8080",
@@ -10,6 +14,7 @@ func TestEnvParamsRoundTrip(t *testing.T) {
 		Provider:      "github",
 		GitHubBaseURL: "http://gh.example",
 		EnrichLimit:   25,
+		DispatchedAt:  dispatched,
 	}
 	env := Env(in)
 	out, err := ParamsFromEnv(func(k string) string { return env[k] })
@@ -19,6 +24,9 @@ func TestEnvParamsRoundTrip(t *testing.T) {
 	if out.JobType != in.JobType || out.BaseURL != in.BaseURL || out.Token != in.Token ||
 		out.Provider != in.Provider || out.GitHubBaseURL != in.GitHubBaseURL || out.EnrichLimit != in.EnrichLimit {
 		t.Fatalf("round trip mismatch:\n in=%+v\nout=%+v", in, out)
+	}
+	if !out.DispatchedAt.Equal(dispatched) {
+		t.Fatalf("DispatchedAt round trip: got %v, want %v", out.DispatchedAt, dispatched)
 	}
 }
 

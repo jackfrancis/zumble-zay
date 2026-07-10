@@ -72,6 +72,21 @@ var dispatchDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 	Buckets:   latencyBuckets,
 }, []string{"launcher", "type"})
 
+// provisioning is the runtime-reported wall time from dispatch-start to the
+// runtime actually starting work — the launcher-symmetric startup cost. Where
+// dispatchDuration times only the orchestrator's own Dispatch call (and so misses
+// a pod launcher's asynchronous cold-start, which happens after Dispatch
+// returns), this is measured by the runtime, so a pod's cold-start and a durable
+// actor's resume land in one comparable number; provisioning minus dispatch is
+// the async boot a pod launcher would otherwise hide (docs/adr/0024).
+var provisioning = promauto.NewHistogramVec(prometheus.HistogramOpts{
+	Namespace: "zz",
+	Subsystem: "agent",
+	Name:      "job_provisioning_seconds",
+	Help:      "Runtime-reported wall time from dispatch to the runtime starting work (launcher-symmetric provisioning), by launcher and type.",
+	Buckets:   latencyBuckets,
+}, []string{"launcher", "type"})
+
 // runtimeWork is the runtime's self-reported in-runtime work time (fetch + model
 // loop + write-back) — the job's wall clock minus queue wait, dispatch, and
 // completion signalling. Comparing it with job_duration isolates the launcher /
@@ -130,6 +145,12 @@ func ObserveQueueWait(jobType string, d time.Duration) {
 // ObserveDispatch records how long the launcher's Dispatch call took, by launcher.
 func ObserveDispatch(launcher, jobType string, d time.Duration) {
 	dispatchDuration.WithLabelValues(launcher, jobType).Observe(d.Seconds())
+}
+
+// ObserveProvisioning records the runtime-reported dispatch-to-start latency —
+// the launcher-symmetric startup cost (pod cold-start or durable-actor resume).
+func ObserveProvisioning(launcher, jobType string, seconds float64) {
+	provisioning.WithLabelValues(launcher, jobType).Observe(seconds)
 }
 
 // ObserveRuntimeWork records a runtime's self-reported in-runtime work time.

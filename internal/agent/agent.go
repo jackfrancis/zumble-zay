@@ -44,6 +44,12 @@ type RunParams struct {
 	AIEndpoint    string                     // chat-completions URL for the llm-rank ranker
 	AIModel       string                     // ranking model id; empty uses the llm default
 	AIToken       string                     // bearer token for the model; with no endpoint and no token, falls back to the stub
+	// DispatchedAt is when the orchestrator began dispatching this job. Run
+	// subtracts it from its own start time to report provisioning latency — the
+	// launcher-symmetric startup cost (docs/adr/0024) — so a pod's cold-start and a
+	// durable actor's resume are measured the same way. Zero in-process (no
+	// dispatch) and from an older orchestrator.
+	DispatchedAt time.Time
 	// ReportCompletion makes Run post a terminal completion to ZZ when the job
 	// finishes (docs/adr/0024). The out-of-process runtime (cmd/runtime) sets it
 	// so the orchestrator finalizes the job immediately; the in-process launcher
@@ -112,6 +118,16 @@ func Run(ctx context.Context, p RunParams) error {
 	// launcher that does not report completion (in-process) simply never reads it.
 	ctx, collector := llm.WithCollector(ctx)
 	started := time.Now()
+	// Provisioning latency: from the orchestrator's dispatch-start (injected as
+	// EnvDispatchedAt) to the runtime starting work now. Reported back so a pod's
+	// cold-start and a durable actor's resume are one comparable number
+	// (docs/adr/0024); zero when unset (in-process, or an older orchestrator).
+	var provisioningSeconds float64
+	if !p.DispatchedAt.IsZero() {
+		if d := started.Sub(p.DispatchedAt); d > 0 {
+			provisioningSeconds = d.Seconds()
+		}
+	}
 	err := dispatch(ctx, p)
 	runtimeDur := time.Since(started)
 	// When running out-of-process (cmd/runtime), report terminal completion so the
@@ -122,10 +138,11 @@ func Run(ctx context.Context, p RunParams) error {
 	if p.ReportCompletion && p.BaseURL != "" && p.Token != "" {
 		reportCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		timing := runtimestats.Timing{
-			RuntimeSeconds: runtimeDur.Seconds(),
-			ModelSeconds:   collector.ModelDuration().Seconds(),
-			ModelCalls:     collector.ModelCalls(),
-			ToolCalls:      collector.ToolCalls(),
+			RuntimeSeconds:      runtimeDur.Seconds(),
+			ProvisioningSeconds: provisioningSeconds,
+			ModelSeconds:        collector.ModelDuration().Seconds(),
+			ModelCalls:          collector.ModelCalls(),
+			ToolCalls:           collector.ToolCalls(),
 		}
 		if rerr := NewZZClient(p.BaseURL, p.Token, p.Client).ReportCompletion(reportCtx, err, timing); rerr != nil {
 			slog.Default().Warn("runtime completion report failed", "job_type", p.JobType, "err", rerr)

@@ -77,6 +77,11 @@ type JobSpec struct {
 	// ItemID scopes a per-item job (e.g. github-converse) to one work item; it is
 	// empty for the whole-worklist pipeline stages.
 	ItemID string
+	// DispatchedAt is when the orchestrator began dispatching this job. A launcher
+	// forwards it to the runtime (via the injection contract) so the runtime can
+	// report provisioning latency — the launcher-symmetric startup cost — and it is
+	// zero for a synchronous in-process launch (docs/adr/0024).
+	DispatchedAt time.Time
 }
 
 // Handle identifies a launched workload and where it ran, so the orchestrator
@@ -558,6 +563,7 @@ func (o *Orchestrator) run(id string) {
 		// resume + routing; for a pod launcher it is the create call (the pod's
 		// cold-start is awaited, not counted here).
 		dispatchStart := time.Now()
+		spec.DispatchedAt = dispatchStart
 		handle, derr := o.safeDispatch(al, ctx, spec, cred)
 		metrics.ObserveDispatch(launcherLabel(handle), string(spec.Type), time.Since(dispatchStart))
 		if derr != nil {
@@ -707,6 +713,9 @@ func (o *Orchestrator) CompleteJob(jobID, errMsg string, timing runtimestats.Tim
 	// runtime), so record nothing rather than a misleading zero.
 	if known && timing.RuntimeSeconds > 0 {
 		metrics.ObserveRuntimeWork(launcher, jobType, timing.RuntimeSeconds)
+		if timing.ProvisioningSeconds > 0 {
+			metrics.ObserveProvisioning(launcher, jobType, timing.ProvisioningSeconds)
+		}
 		metrics.ObserveModelSeconds(jobType, timing.ModelSeconds)
 		metrics.ObserveModelCalls(jobType, timing.ModelCalls)
 		metrics.ObserveToolCalls(jobType, timing.ToolCalls)

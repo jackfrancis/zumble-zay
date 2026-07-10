@@ -15,6 +15,11 @@ type Timing struct {
 	// write-back): the job's wall clock minus queue wait, dispatch/provisioning,
 	// and completion signalling, which the orchestrator measures on its own.
 	RuntimeSeconds float64 `json:"runtime_seconds,omitempty"`
+	// ProvisioningSeconds is the wall time from the orchestrator dispatching the
+	// job to the runtime starting work: a pod's cold-start or a durable actor's
+	// resume + routing, measured the same way so launchers are comparable. Zero
+	// means not reported (the in-process path, or an older runtime).
+	ProvisioningSeconds float64 `json:"provisioning_seconds,omitempty"`
 	// ModelSeconds is the summed wall time of the job's chat-model calls.
 	ModelSeconds float64 `json:"model_seconds,omitempty"`
 	// ModelCalls is how many chat-model calls the job made (one per ranked item,

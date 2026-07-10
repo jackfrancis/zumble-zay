@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"strconv"
+	"time"
 )
 
 // Injection contract (docs/adr/0012): the environment variables a runtime reads
@@ -19,6 +20,14 @@ const (
 	EnvItemID        = "ZZ_ITEM_ID"
 	EnvAIEndpoint    = "ZZ_AI_ENDPOINT"
 	EnvAIModel       = "ZZ_AI_MODEL"
+	// EnvDispatchedAt carries the orchestrator's dispatch-start timestamp (unix
+	// milliseconds) so the runtime can report provisioning latency: the wall time
+	// from dispatch to the runtime actually starting work. It makes every
+	// substrate's startup cost comparable — a pod launcher's cold-start (which the
+	// orchestrator cannot see, timing only its own create call) and a durable
+	// actor's resume + routing land in the same runtime-measured number
+	// (docs/adr/0024).
+	EnvDispatchedAt = "ZZ_DISPATCHED_AT"
 	// EnvAIToken carries the ranking model's bearer token. Unlike the other
 	// variables it is NOT emitted by Env: it is a secret, so a launcher injects
 	// it out-of-band (the Kubernetes launcher via a Secret reference), and only
@@ -62,7 +71,35 @@ func Env(p RunParams) map[string]string {
 	if p.AIModel != "" {
 		env[EnvAIModel] = p.AIModel
 	}
+	if v := DispatchedAtValue(p.DispatchedAt); v != "" {
+		env[EnvDispatchedAt] = v
+	}
 	return env
+}
+
+// DispatchedAtValue encodes a dispatch-start timestamp for the injection contract
+// (EnvDispatchedAt) as unix milliseconds, or "" when unset. The runtime turns it
+// into provisioning latency, so a pod's cold-start and a durable actor's resume
+// are measured the same way. Milliseconds keep it compact and timezone-free.
+func DispatchedAtValue(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return strconv.FormatInt(t.UnixMilli(), 10)
+}
+
+// dispatchedAtFromValue decodes an EnvDispatchedAt value (unix milliseconds) back
+// to a time; a missing or malformed value yields the zero time, since
+// provisioning is best-effort observability and never a reason to fail a job.
+func dispatchedAtFromValue(v string) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	ms, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
 }
 
 // ParamsFromEnv reconstructs RunParams from the injection contract; getenv is
@@ -79,6 +116,7 @@ func ParamsFromEnv(getenv func(string) string) (RunParams, error) {
 		AIEndpoint:    getenv(EnvAIEndpoint),
 		AIModel:       getenv(EnvAIModel),
 		AIToken:       getenv(EnvAIToken),
+		DispatchedAt:  dispatchedAtFromValue(getenv(EnvDispatchedAt)),
 	}
 	if v := getenv(EnvEnrichLimit); v != "" {
 		n, err := strconv.Atoi(v)

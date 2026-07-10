@@ -47,6 +47,7 @@ func Env(opts Options, spec orchestrator.JobSpec, token string) map[string]strin
 		GitHubBaseURL: opts.GitHubBaseURL,
 		AIEndpoint:    opts.AIEndpoint,
 		AIModel:       opts.AIModel,
+		DispatchedAt:  spec.DispatchedAt,
 	})
 }
 

@@ -170,6 +170,9 @@ func taskMetadata(spec orchestrator.JobSpec, ticket string) map[string]string {
 	if spec.ItemID != "" {
 		m[agent.EnvItemID] = spec.ItemID
 	}
+	if v := agent.DispatchedAtValue(spec.DispatchedAt); v != "" {
+		m[agent.EnvDispatchedAt] = v
+	}
 	return m
 }
 
