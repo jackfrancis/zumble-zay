@@ -138,6 +138,18 @@ data:
           "targets": [
             {"refId": "A", "expr": "histogram_quantile(0.90, sum(rate(zz_agent_job_queue_wait_seconds_bucket[$__rate_interval])) by (le, type))", "legendFormat": "{{type}}"}
           ]
+        },
+        {
+          "title": "Launcher overhead: avg(duration) - avg(runtime) by launcher (github-converse)",
+          "description": "Time a conversation spends OUTSIDE the runtime's own work (provisioning + dispatch + completion signalling), isolated from the model. The apples-to-apples number for comparing launchers, e.g. agent-sandbox per-job cold-start vs substrate warm-actor resume. Averages subtract exactly.",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "(sum by (launcher)(rate(zz_agent_job_duration_seconds_sum{type=\"github-converse\"}[$__rate_interval])) / sum by (launcher)(rate(zz_agent_job_duration_seconds_count{type=\"github-converse\"}[$__rate_interval]))) - (sum by (launcher)(rate(zz_agent_job_runtime_seconds_sum{type=\"github-converse\"}[$__rate_interval])) / sum by (launcher)(rate(zz_agent_job_runtime_seconds_count{type=\"github-converse\"}[$__rate_interval])))", "legendFormat": "{{launcher}}"}
+          ]
         }
       ]
     }
