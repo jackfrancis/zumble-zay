@@ -95,6 +95,16 @@ func JobTimeout(jobType string) time.Duration {
 // call it, so the runtime behaves identically regardless of substrate
 // (docs/adr/0012). Dispatch is by job type; the per-type logic is unchanged.
 func Run(ctx context.Context, p RunParams) error {
+	// Make the runtime's outbound HTTP resilient to transient connectivity blips
+	// (flaky cluster DNS, a provider hiccup): a bounded, conservative retry so one
+	// "server misbehaving" does not fail the whole job — and, since the pipeline
+	// chains only on success, stall the stage after it. Default the client here so
+	// the retry and the 30s budget apply on every path, then wrap its transport;
+	// modelHTTPClient reuses that transport, so model calls inherit the retry too.
+	if p.Client == nil {
+		p.Client = &http.Client{Timeout: 30 * time.Second}
+	}
+	p.Client = withRetry(p.Client)
 	// Wrap the job context so the llm chat primitive and the converse tool loop
 	// record model-call timing and tool-use counts into a collector, which the
 	// completion report carries back for per-phase metrics (docs/adr/0024). A
