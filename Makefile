@@ -5,7 +5,7 @@
         image-runtime-shell image-runtime-shell-save kind-load-runtime-shell opensandbox-install \
         image-runtime-a2a image-runtime-a2a-save kind-load-runtime-a2a kagent-install \
         substrate-install substrate-cluster \
-        metrics-up metrics-forward metrics-down
+        metrics-up metrics-forward metrics-endpoint-forward metrics-down
 
 BIN := bin/server
 
@@ -121,6 +121,19 @@ PRIMER_DIR := internal/webui/static/primer
 
 KIND_CLUSTER ?= zumble-zay
 KUBE_NS := zumble-zay
+# Kube context for the dev port-forward / log / metrics targets, derived from
+# KIND_CLUSTER so bringing up a second cluster for a second launcher
+# (KIND_CLUSTER=zz2) also retargets them to it. Override for a non-kind context.
+KUBE_CONTEXT ?= kind-$(KIND_CLUSTER)
+# Host-side (local) ports the port-forward targets bind. Override to run two
+# clusters concurrently without host-port collisions; the in-cluster ports (web
+# 8080, orchestrator metrics 9090, Grafana 80) never change. For a second cluster:
+#   make dev-forward              KIND_CLUSTER=zz2 WEB_LOCAL_PORT=8081
+#   make metrics-endpoint-forward KIND_CLUSTER=zz2 METRICS_LOCAL_PORT=9091
+#   make metrics-forward          KIND_CLUSTER=zz2 GRAFANA_LOCAL_PORT=3001
+WEB_LOCAL_PORT ?= 8080
+METRICS_LOCAL_PORT ?= 9090
+GRAFANA_LOCAL_PORT ?= 3000
 
 # The base kustomization ships a default-deny NetworkPolicy on the orchestrator's
 # control API (docs/adr/0033). kind's default CNI (kindnet) does NOT enforce
@@ -555,17 +568,18 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 # Tear down the whole dev environment.
 dev-down: cluster-down
 
-# Port-forward the service to localhost:8080 (blocks).
+# Port-forward the web tier to localhost:$(WEB_LOCAL_PORT) (blocks). Override
+# WEB_LOCAL_PORT (+ KIND_CLUSTER) to forward two clusters without a host collision.
 dev-forward:
-	kubectl -n $(KUBE_NS) port-forward deploy/zumble-zay 8080:8080
+	kubectl --context $(KUBE_CONTEXT) -n $(KUBE_NS) port-forward deploy/zumble-zay $(WEB_LOCAL_PORT):8080
 
 # Tail the web tier logs.
 dev-logs:
-	kubectl -n $(KUBE_NS) logs -f deploy/zumble-zay
+	kubectl --context $(KUBE_CONTEXT) -n $(KUBE_NS) logs -f deploy/zumble-zay
 
 # Tail the orchestrator control-plane logs (docs/adr/0023).
 dev-logs-orchestrator:
-	kubectl -n $(KUBE_NS) logs -f deploy/zumble-zay-orchestrator
+	kubectl --context $(KUBE_CONTEXT) -n $(KUBE_NS) logs -f deploy/zumble-zay-orchestrator
 
 # ---- Observability (Prometheus + Grafana) ---------------------------------
 # EXPERIMENTAL dev observability, orthogonal to the app deploy. metrics-up installs
@@ -584,23 +598,31 @@ metrics-up:
 	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 	helm repo update
 	helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+		--kube-context $(KUBE_CONTEXT) \
 		--namespace $(MONITORING_NAMESPACE) --create-namespace \
 		$(if $(KUBE_PROMETHEUS_STACK_VERSION),--version $(KUBE_PROMETHEUS_STACK_VERSION),) \
 		--set grafana.sidecar.dashboards.searchNamespace=ALL \
 		--set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
 		--set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
 		--wait --timeout 10m
-	kubectl apply -f deploy/k8s/monitoring/
+	kubectl --context $(KUBE_CONTEXT) apply -f deploy/k8s/monitoring/
 	@echo "monitoring installed. Visualize with:  make metrics-forward"
 
-# Port-forward Grafana to localhost:3000 (blocks); prints the generated admin password.
+# Port-forward Grafana to localhost:$(GRAFANA_LOCAL_PORT) (blocks); prints the admin password.
 metrics-forward:
-	@echo "Grafana -> http://localhost:3000  (user: admin)"
-	@printf 'password: '; kubectl -n $(MONITORING_NAMESPACE) get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
+	@echo "Grafana -> http://localhost:$(GRAFANA_LOCAL_PORT)  (user: admin)"
+	@printf 'password: '; kubectl --context $(KUBE_CONTEXT) -n $(MONITORING_NAMESPACE) get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
 	@echo "open the 'Zumble-Zay - Agent Jobs & Conversations' dashboard"
-	kubectl -n $(MONITORING_NAMESPACE) port-forward svc/kube-prometheus-stack-grafana 3000:80
+	kubectl --context $(KUBE_CONTEXT) -n $(MONITORING_NAMESPACE) port-forward svc/kube-prometheus-stack-grafana $(GRAFANA_LOCAL_PORT):80
+
+# Port-forward the orchestrator's raw Prometheus metrics to localhost:$(METRICS_LOCAL_PORT)
+# (blocks). Prometheus scrapes :9090 in-cluster, so this is only for curling the
+# metrics directly or pointing an external scraper; override METRICS_LOCAL_PORT per cluster.
+metrics-endpoint-forward:
+	@echo "metrics -> http://localhost:$(METRICS_LOCAL_PORT)/metrics"
+	kubectl --context $(KUBE_CONTEXT) -n $(KUBE_NS) port-forward deploy/zumble-zay-orchestrator $(METRICS_LOCAL_PORT):9090
 
 # Remove ZZ's scrape wiring and uninstall the stack.
 metrics-down:
-	-kubectl delete -f deploy/k8s/monitoring/
-	-helm uninstall kube-prometheus-stack --namespace $(MONITORING_NAMESPACE)
+	-kubectl --context $(KUBE_CONTEXT) delete -f deploy/k8s/monitoring/
+	-helm uninstall kube-prometheus-stack --kube-context $(KUBE_CONTEXT) --namespace $(MONITORING_NAMESPACE)
