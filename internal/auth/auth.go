@@ -207,17 +207,25 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	token, err := p.oauth.Exchange(ctx, code, oauth2.VerifierOption(flow.Verifier))
 	if err != nil {
+		// Surface the underlying cause — a provider or network error (a DNS blip,
+		// "incorrect_client_credentials", "redirect_uri_mismatch", …) — because the
+		// UI only shows a generic 502, so without this the failure is a black box.
+		// The error carries no secret: it is the token endpoint's failure, not the
+		// authorization code or any token.
+		slog.Default().Warn("oauth token exchange failed", "provider", p.name, "err", err)
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
 
 	raw, err := h.fetchUser(ctx, p, token)
 	if err != nil {
+		slog.Default().Warn("oauth user fetch failed", "provider", p.name, "err", err)
 		http.Error(w, "failed to fetch user profile", http.StatusBadGateway)
 		return
 	}
 	user, err := p.mapUser(raw)
 	if err != nil {
+		slog.Default().Warn("oauth user profile invalid", "provider", p.name, "err", err)
 		http.Error(w, "invalid user profile", http.StatusBadGateway)
 		return
 	}
