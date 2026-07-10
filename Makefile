@@ -584,8 +584,17 @@ dev-down: cluster-down
 
 # Port-forward the web tier to localhost:$(WEB_LOCAL_PORT) (blocks). Override
 # WEB_LOCAL_PORT (+ KIND_CLUSTER) to forward two clusters without a host collision.
+# Auto-reconnects: kubectl port-forward drops on idle, API blips, and every
+# `dev-up` rollout (its target pod is replaced) and never reconnects itself, so
+# loop it. Ctrl-C exits cleanly via the trap. Over a remote-SSH tunnel, pair this
+# with SSH keepalives (ServerAliveInterval) so the tunnel itself does not wedge.
 dev-forward:
-	kubectl --context $(KUBE_CONTEXT) -n $(KUBE_NS) port-forward deploy/zumble-zay $(WEB_LOCAL_PORT):8080
+	@echo "forwarding localhost:$(WEB_LOCAL_PORT) -> deploy/zumble-zay:8080 (auto-reconnect; Ctrl-C to stop)"
+	@trap 'exit 0' INT TERM; while true; do \
+		kubectl --context $(KUBE_CONTEXT) -n $(KUBE_NS) port-forward deploy/zumble-zay $(WEB_LOCAL_PORT):8080 || true; \
+		echo "dev-forward: connection dropped; reconnecting in 1s (Ctrl-C to stop)"; \
+		sleep 1; \
+	done
 
 # Tail the web tier logs.
 dev-logs:
@@ -627,14 +636,22 @@ metrics-forward:
 	@echo "Grafana -> http://localhost:$(GRAFANA_LOCAL_PORT)  (user: admin)"
 	@printf 'password: '; kubectl --context $(KUBE_CONTEXT) -n $(MONITORING_NAMESPACE) get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
 	@echo "open the 'Zumble-Zay - Agent Jobs & Conversations' dashboard"
-	kubectl --context $(KUBE_CONTEXT) -n $(MONITORING_NAMESPACE) port-forward svc/kube-prometheus-stack-grafana $(GRAFANA_LOCAL_PORT):80
+	@trap 'exit 0' INT TERM; while true; do \
+		kubectl --context $(KUBE_CONTEXT) -n $(MONITORING_NAMESPACE) port-forward svc/kube-prometheus-stack-grafana $(GRAFANA_LOCAL_PORT):80 || true; \
+		echo "metrics-forward: connection dropped; reconnecting in 1s (Ctrl-C to stop)"; \
+		sleep 1; \
+	done
 
 # Port-forward the orchestrator's raw Prometheus metrics to localhost:$(METRICS_LOCAL_PORT)
 # (blocks). Prometheus scrapes :9090 in-cluster, so this is only for curling the
 # metrics directly or pointing an external scraper; override METRICS_LOCAL_PORT per cluster.
 metrics-endpoint-forward:
 	@echo "metrics -> http://localhost:$(METRICS_LOCAL_PORT)/metrics"
-	kubectl --context $(KUBE_CONTEXT) -n $(KUBE_NS) port-forward deploy/zumble-zay-orchestrator $(METRICS_LOCAL_PORT):9090
+	@trap 'exit 0' INT TERM; while true; do \
+		kubectl --context $(KUBE_CONTEXT) -n $(KUBE_NS) port-forward deploy/zumble-zay-orchestrator $(METRICS_LOCAL_PORT):9090 || true; \
+		echo "metrics-endpoint-forward: connection dropped; reconnecting in 1s (Ctrl-C to stop)"; \
+		sleep 1; \
+	done
 
 # Remove ZZ's scrape wiring and uninstall the stack.
 metrics-down:
