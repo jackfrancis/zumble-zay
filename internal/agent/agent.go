@@ -23,6 +23,7 @@ import (
 
 	"github.com/jackfrancis/zumble-zay/internal/github"
 	"github.com/jackfrancis/zumble-zay/internal/llm"
+	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
@@ -94,7 +95,14 @@ func JobTimeout(jobType string) time.Duration {
 // call it, so the runtime behaves identically regardless of substrate
 // (docs/adr/0012). Dispatch is by job type; the per-type logic is unchanged.
 func Run(ctx context.Context, p RunParams) error {
+	// Wrap the job context so the llm chat primitive and the converse tool loop
+	// record model-call timing and tool-use counts into a collector, which the
+	// completion report carries back for per-phase metrics (docs/adr/0024). A
+	// launcher that does not report completion (in-process) simply never reads it.
+	ctx, collector := llm.WithCollector(ctx)
+	started := time.Now()
 	err := dispatch(ctx, p)
+	runtimeDur := time.Since(started)
 	// When running out-of-process (cmd/runtime), report terminal completion so the
 	// orchestrator finalizes the job the instant the runtime finishes, rather than
 	// waiting to observe the workload terminate (docs/adr/0024). Best-effort: a
@@ -102,7 +110,13 @@ func Run(ctx context.Context, p RunParams) error {
 	// A fresh context is used so the report still sends after a job-deadline cancel.
 	if p.ReportCompletion && p.BaseURL != "" && p.Token != "" {
 		reportCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if rerr := NewZZClient(p.BaseURL, p.Token, p.Client).ReportCompletion(reportCtx, err); rerr != nil {
+		timing := runtimestats.Timing{
+			RuntimeSeconds: runtimeDur.Seconds(),
+			ModelSeconds:   collector.ModelDuration().Seconds(),
+			ModelCalls:     collector.ModelCalls(),
+			ToolCalls:      collector.ToolCalls(),
+		}
+		if rerr := NewZZClient(p.BaseURL, p.Token, p.Client).ReportCompletion(reportCtx, err, timing); rerr != nil {
 			slog.Default().Warn("runtime completion report failed", "job_type", p.JobType, "err", rerr)
 		}
 		cancel()

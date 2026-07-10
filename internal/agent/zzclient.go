@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 	"github.com/jackfrancis/zumble-zay/internal/worklist"
 )
 
@@ -134,15 +135,24 @@ func (c *ZZClient) Ingest(ctx context.Context, items []worklist.WorkItem) error 
 	return nil
 }
 
+// completionRequest is the POST /agent/complete body: the terminal error (empty
+// on success) plus the runtime's self-reported phase timing (docs/adr/0024). The
+// Timing fields are promoted (embedded) so they sit flat alongside "error".
+type completionRequest struct {
+	Error string `json:"error,omitempty"`
+	runtimestats.Timing
+}
+
 // ReportCompletion performs the optional third call of the contract: POST
-// /agent/complete, telling ZZ the job finished and whether it failed. The
-// orchestrator finalizes the job the instant this lands, rather than waiting to
-// observe the workload terminate (docs/adr/0024). It is best-effort: if it does
-// not arrive, the orchestrator's substrate watch backstops completion.
-func (c *ZZClient) ReportCompletion(ctx context.Context, jobErr error) error {
-	payload := map[string]string{}
+// /agent/complete, telling ZZ the job finished and whether it failed, with the
+// runtime's self-reported phase timing. The orchestrator finalizes the job the
+// instant this lands, rather than waiting to observe the workload terminate
+// (docs/adr/0024). It is best-effort: if it does not arrive, the orchestrator's
+// substrate watch backstops completion.
+func (c *ZZClient) ReportCompletion(ctx context.Context, jobErr error, timing runtimestats.Timing) error {
+	payload := completionRequest{Timing: timing}
 	if jobErr != nil {
-		payload["error"] = jobErr.Error()
+		payload.Error = jobErr.Error()
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

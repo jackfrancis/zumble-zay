@@ -199,6 +199,11 @@ func chatComplete(ctx context.Context, httpClient *http.Client, endpoint, token 
 // since a tool-calling turn returns tool_calls with empty content (docs/adr/0020).
 // It always sends the Copilot integration header (see copilotIntegrationID).
 func chat(ctx context.Context, httpClient *http.Client, endpoint, token string, body chatRequest) (chatMessage, error) {
+	// Record this model call's wall time + count on the context collector (a no-op
+	// when the runtime installed none), so a job can report the model share of its
+	// turn (docs/adr/0024).
+	start := time.Now()
+	defer func() { recordModelCall(ctx, time.Since(start)) }()
 	reqBody, err := json.Marshal(body)
 	if err != nil {
 		return chatMessage{}, fmt.Errorf("marshal request: %w", err)

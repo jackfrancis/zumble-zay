@@ -8,17 +8,19 @@ import (
 	"testing"
 
 	"github.com/jackfrancis/zumble-zay/internal/principal"
+	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 )
 
 type fakeReporter struct {
 	called bool
 	jobID  string
 	errMsg string
+	timing runtimestats.Timing
 }
 
-func (f *fakeReporter) Complete(_ context.Context, jobID, errMsg string) error {
+func (f *fakeReporter) Complete(_ context.Context, jobID, errMsg string, timing runtimestats.Timing) error {
 	f.called = true
-	f.jobID, f.errMsg = jobID, errMsg
+	f.jobID, f.errMsg, f.timing = jobID, errMsg, timing
 	return nil
 }
 

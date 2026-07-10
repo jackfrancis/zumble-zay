@@ -143,6 +143,7 @@ func (c *Converser) Reply(ctx context.Context, item worklist.WorkItem, viewerLog
 				c.log.Info("converse tool call", "name", tc.Function.Name, "args", truncateArgs(tc.Function.Arguments))
 			}
 			result, err := tools.Invoke(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			recordToolCall(ctx)
 			if err != nil {
 				result = "tool error: " + err.Error()
 			}

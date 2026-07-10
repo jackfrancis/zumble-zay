@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackfrancis/zumble-zay/internal/controlplane"
+	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 )
 
 // fakeController records the calls the adapters and handler make.
@@ -53,7 +54,7 @@ func (f *fakeController) Active(owner string) bool {
 	return f.active[owner]
 }
 
-func (f *fakeController) CompleteJob(jobID, errMsg string) {
+func (f *fakeController) CompleteJob(jobID, errMsg string, _ runtimestats.Timing) {
 	f.mu.Lock()
 	f.completed = append(f.completed, [2]string{jobID, errMsg})
 	f.mu.Unlock()
@@ -169,7 +170,7 @@ func TestCompleteForwardsToController(t *testing.T) {
 	defer ts.Close()
 
 	c := controlplane.NewHTTP(ts.URL, ts.Client(), staticSource("sa-token"))
-	if err := c.Complete(context.Background(), "job-1", "boom"); err != nil {
+	if err := c.Complete(context.Background(), "job-1", "boom", runtimestats.Timing{}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	fc.mu.Lock()

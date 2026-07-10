@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 )
 
 // Client is the web tier's view of the control plane. Every method is safe to
@@ -36,8 +38,9 @@ type Client interface {
 	Converse(ctx context.Context, ownerID, itemID string) error
 	Research(ctx context.Context, ownerID, itemID string) error
 	Active(ctx context.Context, ownerID string) (bool, error)
-	// Complete forwards a runtime's terminal completion for a job (docs/adr/0024).
-	Complete(ctx context.Context, jobID, errMsg string) error
+	// Complete forwards a runtime's terminal completion for a job (docs/adr/0024),
+	// with the runtime's self-reported phase timing.
+	Complete(ctx context.Context, jobID, errMsg string, timing runtimestats.Timing) error
 	// RedeemTicket exchanges a pull substrate's single-use ticket for its job
 	// token (docs/adr/0029); expiresIn is the token lifetime in seconds.
 	RedeemTicket(ctx context.Context, ticket string) (token string, expiresIn int, err error)
@@ -52,8 +55,9 @@ type Controller interface {
 	Research(ctx context.Context, ownerID, itemID string) error
 	Active(ownerID string) bool
 	// CompleteJob delivers a runtime's terminal completion for a job
-	// (docs/adr/0024); an empty errMsg is success.
-	CompleteJob(jobID, errMsg string)
+	// (docs/adr/0024); an empty errMsg is success. timing is the runtime's
+	// self-reported phase breakdown, for metrics.
+	CompleteJob(jobID, errMsg string, timing runtimestats.Timing)
 	// RedeemTicket exchanges a pull substrate's single-use ticket for its job
 	// token (docs/adr/0029). The ticket is itself the authorization.
 	RedeemTicket(ticket string) (token string, ttl time.Duration, err error)
@@ -90,8 +94,8 @@ func (l *Local) Active(_ context.Context, ownerID string) (bool, error) {
 
 // Complete forwards a runtime's terminal completion for a job to the co-located
 // orchestrator (docs/adr/0024).
-func (l *Local) Complete(_ context.Context, jobID, errMsg string) error {
-	l.c.CompleteJob(jobID, errMsg)
+func (l *Local) Complete(_ context.Context, jobID, errMsg string, timing runtimestats.Timing) error {
+	l.c.CompleteJob(jobID, errMsg, timing)
 	return nil
 }
 
@@ -145,8 +149,8 @@ func (h *HTTP) Research(ctx context.Context, ownerID, itemID string) error {
 
 // Complete forwards a runtime's terminal completion for a job to the
 // orchestrator's control API (docs/adr/0024).
-func (h *HTTP) Complete(ctx context.Context, jobID, errMsg string) error {
-	return h.trigger(ctx, "/control/complete", completeRequest{JobID: jobID, Error: errMsg})
+func (h *HTTP) Complete(ctx context.Context, jobID, errMsg string, timing runtimestats.Timing) error {
+	return h.trigger(ctx, "/control/complete", completeRequest{JobID: jobID, Error: errMsg, Timing: timing})
 }
 
 // RedeemTicket redeems a pull substrate's single-use ticket against the
@@ -344,7 +348,7 @@ func (h *Handler) complete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job_id required", http.StatusBadRequest)
 		return
 	}
-	h.c.CompleteJob(req.JobID, req.Error)
+	h.c.CompleteJob(req.JobID, req.Error, req.Timing)
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -461,6 +465,7 @@ type request struct {
 type completeRequest struct {
 	JobID string `json:"job_id"`
 	Error string `json:"error,omitempty"`
+	runtimestats.Timing
 }
 
 // ticketRequest is the body of POST /control/redeem: a pull substrate's

@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/jackfrancis/zumble-zay/internal/principal"
+	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 )
 
 // CompletionReporter forwards a runtime's terminal completion to the control
@@ -15,7 +16,7 @@ import (
 // this seam keeps the api package off the control plane's concrete type, as the
 // worklist and conversation handlers do for their enqueuers.
 type CompletionReporter interface {
-	Complete(ctx context.Context, jobID, errMsg string) error
+	Complete(ctx context.Context, jobID, errMsg string, timing runtimestats.Timing) error
 }
 
 // CompleteHandler receives a runtime's terminal completion report (POST
@@ -35,6 +36,7 @@ func NewCompleteHandler(reporter CompletionReporter, log *slog.Logger) *Complete
 
 type completeRequest struct {
 	Error string `json:"error,omitempty"`
+	runtimestats.Timing
 }
 
 // Complete handles POST /agent/complete. The job is identified by the workload
@@ -51,7 +53,7 @@ func (h *CompleteHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	var req completeRequest
 	// An empty body is allowed: success with no detail.
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
-	if err := h.reporter.Complete(r.Context(), p.JobID, req.Error); err != nil && h.log != nil {
+	if err := h.reporter.Complete(r.Context(), p.JobID, req.Error, req.Timing); err != nil && h.log != nil {
 		h.log.Warn("forward runtime completion failed", "job", p.JobID, "err", err)
 	}
 	w.WriteHeader(http.StatusAccepted)

@@ -10,6 +10,7 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/mint"
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 	"github.com/jackfrancis/zumble-zay/internal/principal"
+	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 )
 
 const testSecret = "test-secret-of-sufficient-length!"
@@ -536,7 +537,7 @@ func TestCallbackCompletesBeforeWatch(t *testing.T) {
 	deadline := time.After(2 * time.Second)
 	for {
 		if j, ok := jobForUser(o, user); ok {
-			o.CompleteJob(j.ID, "")
+			o.CompleteJob(j.ID, "", runtimestats.Timing{})
 			if jj, _ := o.Job(j.ID); jj.State == orchestrator.StateSucceeded {
 				return
 			}

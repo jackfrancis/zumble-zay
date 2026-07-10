@@ -91,6 +91,53 @@ data:
           "targets": [
             {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(zz_agent_job_duration_seconds_bucket[$__rate_interval])) by (le, type))", "legendFormat": "{{type}}"}
           ]
+        },
+        {
+          "title": "Conversation time: total vs runtime vs model (p50)",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "histogram_quantile(0.50, sum(rate(zz_agent_job_duration_seconds_bucket{type=\"github-converse\"}[$__rate_interval])) by (le))", "legendFormat": "total"},
+            {"refId": "B", "expr": "histogram_quantile(0.50, sum(rate(zz_agent_job_runtime_seconds_bucket{type=\"github-converse\"}[$__rate_interval])) by (le))", "legendFormat": "runtime work"},
+            {"refId": "C", "expr": "histogram_quantile(0.50, sum(rate(zz_agent_job_model_seconds_bucket{type=\"github-converse\"}[$__rate_interval])) by (le))", "legendFormat": "model calls"}
+          ]
+        },
+        {
+          "title": "Dispatch / provisioning latency by launcher (p90)",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "histogram_quantile(0.90, sum(rate(zz_agent_job_dispatch_duration_seconds_bucket[$__rate_interval])) by (le, launcher))", "legendFormat": "{{launcher}}"}
+          ]
+        },
+        {
+          "title": "Model & tool calls per conversation (p50)",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+          "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "histogram_quantile(0.50, sum(rate(zz_agent_job_model_calls_bucket{type=\"github-converse\"}[$__rate_interval])) by (le))", "legendFormat": "model calls"},
+            {"refId": "B", "expr": "histogram_quantile(0.50, sum(rate(zz_agent_job_tool_calls_bucket{type=\"github-converse\"}[$__rate_interval])) by (le))", "legendFormat": "tool calls"}
+          ]
+        },
+        {
+          "title": "Queue wait by job type (p90)",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "histogram_quantile(0.90, sum(rate(zz_agent_job_queue_wait_seconds_bucket[$__rate_interval])) by (le, type))", "legendFormat": "{{type}}"}
+          ]
         }
       ]
     }

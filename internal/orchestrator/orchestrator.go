@@ -21,6 +21,7 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/metrics"
 	"github.com/jackfrancis/zumble-zay/internal/mint"
 	"github.com/jackfrancis/zumble-zay/internal/principal"
+	"github.com/jackfrancis/zumble-zay/internal/runtimestats"
 )
 
 // JobType identifies a kind of agent work and selects its runtime-type policy.
@@ -483,7 +484,13 @@ func (o *Orchestrator) run(id string) {
 	if job.ItemID != "" {
 		key += "/" + job.ItemID
 	}
+	createdAt := job.CreatedAt
 	o.mu.Unlock()
+
+	// Queue wait: how long the job sat between enqueue and this worker picking it
+	// up, recorded on its own axis so a saturated worker pool is visible apart from
+	// launcher and runtime time.
+	metrics.ObserveQueueWait(string(spec.Type), time.Since(createdAt))
 
 	// The credential handed to the launcher. A push substrate receives the job
 	// token, minted at spawn (docs/adr/0002); a pull substrate receives a
@@ -505,7 +512,14 @@ func (o *Orchestrator) run(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), o.deadlineFor(spec.Type))
 
 	if al, ok := o.launcher.(AsyncLauncher); ok {
+		// Dispatch latency is the launcher-attributable provisioning cost, kept
+		// apart from the model-dominated runtime work so launchers stay comparable
+		// even under a slow model. For a durable/A2A substrate it captures actor
+		// resume + routing; for a pod launcher it is the create call (the pod's
+		// cold-start is awaited, not counted here).
+		dispatchStart := time.Now()
 		handle, derr := o.safeDispatch(al, ctx, spec, cred)
+		metrics.ObserveDispatch(launcherLabel(handle), string(spec.Type), time.Since(dispatchStart))
 		if derr != nil {
 			cancel()
 			o.finish(id, key, handle, derr)
@@ -572,7 +586,7 @@ func (o *Orchestrator) finish(id, key string, handle Handle, err error) {
 	if err != nil {
 		outcome = metrics.OutcomeFailed
 	}
-	metrics.ObserveJob(string(jobType), outcome, dur)
+	metrics.ObserveJob(string(jobType), launcherLabel(handle), outcome, dur)
 
 	if err != nil {
 		if o.log != nil {
@@ -592,6 +606,16 @@ func (o *Orchestrator) finish(id, key string, handle Handle, err error) {
 			o.log.Warn("could not enqueue next pipeline stage", "stage", next, "user", user, "err", e)
 		}
 	}
+}
+
+// launcherLabel is the metric label for the launcher that ran a job, taken from
+// the dispatch Handle (docs/adr/0012). A job that failed before dispatch has no
+// handle, so it is attributed to "unknown" rather than an empty label.
+func launcherLabel(h Handle) string {
+	if h.Kind == "" {
+		return "unknown"
+	}
+	return h.Kind
 }
 
 // setHandle records where an async job's workload was dispatched, before it
@@ -627,10 +651,27 @@ func (o *Orchestrator) deregisterCompletion(jobID string) {
 // job. An unknown or already-finalized jobID is a no-op (the watch handled it,
 // or there is nothing to await — e.g. an in-process job whose completion is its
 // Launch return).
-func (o *Orchestrator) CompleteJob(jobID, errMsg string) {
+func (o *Orchestrator) CompleteJob(jobID, errMsg string, timing runtimestats.Timing) {
 	o.mu.Lock()
 	ch, ok := o.completions[jobID]
+	var jobType, launcher string
+	var known bool
+	if job := o.jobs[jobID]; job != nil {
+		jobType, launcher, known = string(job.Type), launcherLabel(job.Handle), true
+	}
 	o.mu.Unlock()
+
+	// Emit the runtime's self-reported phase breakdown (docs/adr/0024): the model
+	// vs tool-loop vs I/O split that the whole-job duration hides. A zero
+	// RuntimeSeconds means it was not reported (the in-process path, or an older
+	// runtime), so record nothing rather than a misleading zero.
+	if known && timing.RuntimeSeconds > 0 {
+		metrics.ObserveRuntimeWork(launcher, jobType, timing.RuntimeSeconds)
+		metrics.ObserveModelSeconds(jobType, timing.ModelSeconds)
+		metrics.ObserveModelCalls(jobType, timing.ModelCalls)
+		metrics.ObserveToolCalls(jobType, timing.ToolCalls)
+	}
+
 	if !ok {
 		return
 	}
