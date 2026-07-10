@@ -204,6 +204,56 @@ func TestIngestPreservesAndClearsCompletedAt(t *testing.T) {
 	}
 }
 
+// TestIngestPreservesProposedAcrossReingest proves the LLM axis proposal the
+// llm-rank job writes survives a later github-ingest that carries none. Without
+// preservation, the next ingest cycle's wholesale Upsert wipes Proposed and the
+// item silently reverts to its signal-based rationale (docs/adr/0011).
+func TestIngestPreservesProposedAcrossReingest(t *testing.T) {
+	store := worklist.NewMemoryStore()
+	h := NewIngestHandler(store, nil)
+	updated := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+
+	post := func(it worklist.WorkItem) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"items": []worklist.WorkItem{it}})
+		req := httptest.NewRequest(http.MethodPost, "/agent/worklist", bytes.NewReader(body))
+		p := &principal.Principal{Kind: principal.KindUser, Subject: "u1", ActingUserID: "u1", Scopes: []principal.Scope{principal.ScopeAll}}
+		req = req.WithContext(principal.NewContext(req.Context(), p))
+		rec := httptest.NewRecorder()
+		h.Ingest(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("ingest status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// The llm-rank job writes a proposal (with a rationale) for the item.
+	post(worklist.WorkItem{
+		ID: "x", Source: "github", GitHub: worklist.GitHubRef{UpdatedAt: updated},
+		Signals: worklist.Signals{Proposed: &worklist.AxisProposal{
+			Relevance: 0.9, Impact: 0.7, Engagement: 0.4, Urgency: 0.8, Confidence: 0.9,
+			Rationale: "you own this review",
+		}},
+	})
+	got, _ := store.List(context.Background(), "u1")
+	if len(got) != 1 || got[0].Signals.Proposed == nil {
+		t.Fatalf("proposal should be stored by the rank ingest, got %+v", got)
+	}
+
+	// A later github-ingest re-fetches the same item fresh from GitHub with no
+	// proposal: the stored proposal (and its rationale) must survive.
+	post(worklist.WorkItem{ID: "x", Source: "github", GitHub: worklist.GitHubRef{UpdatedAt: updated.Add(time.Hour)}})
+	got, _ = store.List(context.Background(), "u1")
+	if len(got) != 1 || got[0].Signals.Proposed == nil {
+		t.Fatalf("proposal must survive a later github-ingest, got %+v", got)
+	}
+	if r := got[0].Signals.Proposed.Rationale; r != "you own this review" {
+		t.Errorf("preserved rationale = %q, want the rank job's", r)
+	}
+	if got[0].Meta.Rationale != "you own this review" {
+		t.Errorf("scored Meta.Rationale = %q, want the proposal's (not the signal default)", got[0].Meta.Rationale)
+	}
+}
+
 // TestIngestFlagsBotRequestedReviews proves the bot-reviewer policy is applied in
 // ZZ core: a review requested by a configured bot is flagged, a human's is not.
 func TestIngestFlagsBotRequestedReviews(t *testing.T) {

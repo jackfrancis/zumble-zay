@@ -75,6 +75,7 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 	prevThread := make(map[string][]worklist.Message, len(existing))
 	prevReadAt := make(map[string]time.Time, len(existing))
 	prevResearch := make(map[string]*worklist.ResearchAdjustment, len(existing))
+	prevProposed := make(map[string]*worklist.AxisProposal, len(existing))
 	for _, it := range existing {
 		if !it.Meta.HiddenAt.IsZero() {
 			prevHidden[it.ID] = it.Meta.HiddenAt
@@ -87,6 +88,9 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		}
 		if it.Signals.Research != nil {
 			prevResearch[it.ID] = it.Signals.Research
+		}
+		if it.Signals.Proposed != nil {
+			prevProposed[it.ID] = it.Signals.Proposed
 		}
 	}
 
@@ -101,6 +105,15 @@ func (h *IngestHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		// foundation. A github-ingest sends no research; enrich/rank round-trip the
 		// stored value, so this is a no-op for them.
 		req.Items[i].Signals.Research = prevResearch[req.Items[i].ID]
+		// Preserve the LLM axis proposal across re-ingest (docs/adr/0011): only the
+		// llm-rank job produces one, so a github-ingest (and an enrich that read the
+		// item before rank wrote) POSTs none. Without this, the next ingest cycle's
+		// wholesale Upsert wipes the rank job's proposal and the item silently falls
+		// back to its signal-based rationale. Keep a freshly-sent proposal (the rank
+		// job); restore the stored one otherwise. BEFORE scoring so Score blends it in.
+		if req.Items[i].Signals.Proposed == nil {
+			req.Items[i].Signals.Proposed = prevProposed[req.Items[i].ID]
+		}
 		// Bot-reviewer policy (ZZ core, docs/adr/0015): a review requested by an
 		// automated account (e.g. k8s-ci-robot) is not an explicit human ask, so
 		// flag it for the ranker. Derived here so the runtime stays policy-free.

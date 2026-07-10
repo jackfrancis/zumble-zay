@@ -430,7 +430,12 @@ func runRank(ctx context.Context, p RunParams) error {
 			defer func() { <-sem }()
 			prop, err := ranker.Propose(ctx, items[i])
 			if err != nil {
-				return // best-effort: leave the item without a proposal
+				// Best-effort: leave the item without a proposal. Log it, though —
+				// a silently swallowed ranker error (model response shape, auth, or
+				// JSON parse) otherwise looks identical to "ranking ran fine" from the
+				// outside, which is exactly what made this class of bug hard to spot.
+				slog.Default().Warn("rank: propose failed", "item", items[i].ID, "err", err)
+				return
 			}
 			items[i].Signals.Proposed = &prop
 			mu.Lock()
