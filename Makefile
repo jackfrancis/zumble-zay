@@ -544,6 +544,20 @@ dev-up: cluster-up kind-load kind-load-orchestrator kind-load-runtime
 			SUBSTRATE_ATESPACE=$(SUBSTRATE_ATESPACE) \
 			SUBSTRATE_ACTOR=$(SUBSTRATE_ACTOR); \
 	fi
+	# The OAuth redirect_uri is built server-side from BASE_URL, which the dev
+	# overlay bakes to :8080. WEB_LOCAL_PORT only remaps the local `make dev-forward`
+	# bind (WEB_LOCAL_PORT:8080), so when it differs the browser reaches ZZ on the
+	# forwarded port but GitHub is still told to call back to :8080. Point BASE_URL
+	# and ALLOWED_ORIGINS (CORS for the browser's /api calls) at the forwarded port
+	# so login round-trips; an explicit container env wins over the ConfigMap's
+	# envFrom. Unconditional (defaults to :8080, matching the overlay) so it also
+	# self-heals when WEB_LOCAL_PORT drops back. NOTE: this cannot register the
+	# callback with GitHub — the OAuth App's Authorization callback URL must also
+	# include http://localhost:$(WEB_LOCAL_PORT)/auth/github/callback (GitHub matches
+	# host+port), else the redirect is rejected.
+	kubectl -n $(KUBE_NS) set env deploy/zumble-zay \
+		BASE_URL=http://localhost:$(WEB_LOCAL_PORT) \
+		ALLOWED_ORIGINS=http://localhost:$(WEB_LOCAL_PORT)
 	# The image tag (:dev) is mutable, so `apply` is a no-op when only the image
 	# content changed — the Deployment spec is identical and no new pod is
 	# created, leaving the old code running. kind-load already replaced the image
