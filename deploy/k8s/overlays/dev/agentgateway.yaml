@@ -21,6 +21,20 @@ data:
     # Front GitHub Copilot's OpenAI-compatible chat-completions API. The key is
     # injected as $PROVIDER_API_KEY (env), never written into this ConfigMap.
     llm:
+      # Global model-call governor (docs/adr/0019): a local (in-memory) token
+      # bucket that paces requests to the provider so a burst — e.g. the "Review
+      # PRs" fan-out — cannot stampede Copilot into rate-limiting us. ZZ runs one
+      # agentgateway replica, so this local limit is effectively global. Over the
+      # limit the gateway returns 429, which the runtime's httpretry backs off and
+      # retries. Request-based: maxTokens is the burst, tokensPerFill/fillInterval
+      # the sustained rate. A starting point — tune to the provider's tolerance
+      # (or add a second entry with type: tokens to cap token spend).
+      policies:
+        localRateLimit:
+          - maxTokens: 20
+            tokensPerFill: 2
+            fillInterval: 1s
+            type: requests
       models:
         - name: "*"
           provider:
