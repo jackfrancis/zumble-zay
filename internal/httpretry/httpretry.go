@@ -6,13 +6,14 @@
 //
 // The retry scope is deliberately conservative to avoid duplicating a write: a
 // connection-phase failure (DNS or dial — the request never reached the server)
-// and a 429 (rate-limited — refused, not processed) are retried for any method,
-// while a mid-flight error or a 502/503/504 is retried only for an idempotent
-// method. A 429 is retried on its own, more patient budget (more attempts, a
-// longer backoff) than a connection blip — the endpoint refused the request and
-// a job has minutes of budget, so riding out a short rate-limit window beats
-// failing the whole job — and its Retry-After header is honored (capped) as the
-// backoff.
+// and a 429/502/503 (refused or unavailable — not processed) are retried for any
+// method, while a mid-flight error or a 504 (the upstream may have processed the
+// request) is retried only for an idempotent method. The unavailable family
+// (429/502/503) is retried on its own, more patient budget (more attempts, a
+// longer backoff) than a connection blip — the request was not processed and a
+// job has minutes of budget, so riding out a short rate-limit window or a gateway
+// DNS blip beats failing the whole job — and a 429's Retry-After header is
+// honored (capped) as the backoff.
 package httpretry
 
 import (
@@ -35,10 +36,12 @@ const (
 	DefaultMaxBackoff  = 2 * time.Second
 )
 
-// Default retry policy for a 429 (rate limit): more attempts and a longer
-// backoff than a connection blip. The endpoint refused the request and a job
-// has minutes of budget, so riding out a short rate-limit window beats failing
-// the whole job; the request context / client Timeout still bounds the total.
+// Default retry policy for a temporarily-unavailable server — a 429 (rate limit)
+// or a 502/503 (a gateway that could not reach or complete its backend): more
+// attempts and a longer backoff than a connection blip. The request was not
+// processed and a job has minutes of budget, so riding out a short outage beats
+// failing the whole job; the request context / client Timeout still bounds the
+// total.
 const (
 	DefaultRateLimitAttempts    = 8
 	DefaultRateLimitBaseBackoff = 1 * time.Second
@@ -140,7 +143,11 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			total     int
 			base, max time.Duration
 		)
-		if err == nil && resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+		if err == nil && resp != nil && isUnavailable(resp.StatusCode) {
+			// 429/502/503: a temporarily-unavailable server (a rate limit, or a
+			// gateway that could not reach its backend). Ride it out on the patient
+			// budget — a brief rate-limit window or DNS blip recovers within it; the
+			// request context / client Timeout still bounds the total.
 			left, total, base, max = &rateLimitLeft, t.rlAttempts, t.rlBase, t.rlMax
 		} else {
 			left, total, base, max = &transientLeft, t.attempts, t.baseBackoff, t.maxBackoff
@@ -269,17 +276,32 @@ func shouldRetry(method string, resp *http.Response, err error) bool {
 	if resp == nil {
 		return false
 	}
-	// 429 = rate-limited: the request was refused, not processed, so retrying
-	// after a backoff is safe for any method (including a POST). This is the
-	// canonical back-off-and-retry case; Retry-After paces it.
-	if resp.StatusCode == http.StatusTooManyRequests {
+	// 429 (rate-limited), 502 (bad gateway) and 503 (service unavailable) all mean
+	// the request was refused or never processed — a rate limit, or a server /
+	// intermediary that could not handle it (an in-cluster LLM gateway whose
+	// upstream "required DNS resolution which failed" returns 503) — so retrying
+	// after a backoff is safe for any method, including a POST. A 504 (gateway
+	// timeout) is ambiguous: the upstream may have processed the request before the
+	// gateway gave up, so it is retried only for an idempotent method.
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable:
 		return true
+	case http.StatusGatewayTimeout:
+		return isIdempotent(method)
 	}
-	if isIdempotent(method) {
-		switch resp.StatusCode {
-		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return true
-		}
+	return false
+}
+
+// isUnavailable reports whether a status means the server was temporarily unable
+// to process the request — rate-limited (429) or unavailable (502/503) — which
+// earns the patient backoff budget so a brief outage (a rate-limit window, a
+// gateway DNS blip) is ridden out rather than failing after a couple of quick
+// tries. A 504 is excluded: it may have been processed, so it is not retried
+// patiently for a non-idempotent method.
+func isUnavailable(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable:
+		return true
 	}
 	return false
 }

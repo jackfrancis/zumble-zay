@@ -62,6 +62,21 @@ func TestRateLimitAndTransientHaveSeparateBudgets(t *testing.T) {
 	if connCalls != 1 {
 		t.Fatalf("connection-error attempts = %d, want 1 (transient budget)", connCalls)
 	}
+
+	// A sustained 503 (unavailable) uses the patient budget too, not the transient
+	// one — a gateway that could not reach its backend is ridden out like a 429.
+	var svcCalls int
+	tr3 := newTransport(internalStub(func(*http.Request) (*http.Response, error) {
+		svcCalls++
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: http.NoBody, Header: make(http.Header)}, nil
+	}))
+	req3, _ := http.NewRequest(http.MethodPost, "http://api.githubcopilot.com/chat/completions", strings.NewReader("{}"))
+	if _, err := tr3.RoundTrip(req3); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if svcCalls != 4 {
+		t.Fatalf("503 attempts = %d, want 4 (patient/unavailable budget)", svcCalls)
+	}
 }
 
 // retryAfter parses the header as seconds or an HTTP-date, and reports absence.

@@ -44,13 +44,39 @@ func TestRetriesTransientDNSThenSucceeds(t *testing.T) {
 	}
 }
 
-// A non-idempotent POST that reaches the server and gets a 503 is NOT retried:
-// the request may have been processed, so repeating it could double-write.
-func TestDoesNotRetryPostOn503(t *testing.T) {
+// A 503 (service unavailable) means the request was not processed — an overloaded
+// server, or an in-cluster gateway that could not reach its backend ("backends
+// required DNS resolution which failed") — so it is retried even for a POST,
+// riding out the blip instead of failing the whole job.
+func TestRetriesPostOn503(t *testing.T) {
+	var calls atomic.Int32
+	base := stubRoundTripper(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) <= 1 {
+			return okResp(http.StatusServiceUnavailable), nil
+		}
+		return okResp(http.StatusOK), nil
+	})
+	c := httpretry.WrapN(&http.Client{Transport: base}, 3, time.Millisecond, 2*time.Millisecond)
+
+	resp, err := c.Post("http://api.githubcopilot.com/chat/completions", "application/json", strings.NewReader(`{"model":"x"}`))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after a 503 retry", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2 (1x 503 + 1 success)", got)
+	}
+}
+
+// A 504 (gateway timeout) is ambiguous — the upstream may have processed the
+// request before the gateway gave up — so a non-idempotent POST is NOT retried.
+func TestDoesNotRetryPostOn504(t *testing.T) {
 	var calls atomic.Int32
 	base := stubRoundTripper(func(*http.Request) (*http.Response, error) {
 		calls.Add(1)
-		return okResp(http.StatusServiceUnavailable), nil
+		return okResp(http.StatusGatewayTimeout), nil
 	})
 	c := httpretry.WrapN(&http.Client{Transport: base}, 3, time.Millisecond, 2*time.Millisecond)
 
@@ -58,11 +84,11 @@ func TestDoesNotRetryPostOn503(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Post: %v", err)
 	}
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504", resp.StatusCode)
 	}
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("POST 503 retried: attempts = %d, want 1", got)
+		t.Fatalf("POST 504 retried: attempts = %d, want 1", got)
 	}
 }
 
