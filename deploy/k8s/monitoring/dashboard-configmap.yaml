@@ -144,11 +144,23 @@ data:
           "description": "Time a conversation spends OUTSIDE the runtime's own work (provisioning + dispatch + completion signalling), isolated from the model. The apples-to-apples number for comparing launchers, e.g. agent-sandbox per-job cold-start vs substrate warm-actor resume. Averages subtract exactly.",
           "type": "timeseries",
           "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+          "gridPos": {"h": 8, "w": 18, "x": 0, "y": 32},
           "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
           "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"]}, "tooltip": {"mode": "multi"}},
           "targets": [
             {"refId": "A", "expr": "(sum by (launcher)(rate(zz_agent_job_duration_seconds_sum{type=\"github-converse\"}[$__rate_interval])) / sum by (launcher)(rate(zz_agent_job_duration_seconds_count{type=\"github-converse\"}[$__rate_interval]))) - (sum by (launcher)(rate(zz_agent_job_runtime_seconds_sum{type=\"github-converse\"}[$__rate_interval])) / sum by (launcher)(rate(zz_agent_job_runtime_seconds_count{type=\"github-converse\"}[$__rate_interval])))", "legendFormat": "{{launcher}}"}
+          ]
+        },
+        {
+          "title": "Launcher overhead (range avg)",
+          "description": "avg(duration) - avg(runtime) for github-converse over the selected range, per launcher — the glanceable provisioning + signalling cost, model-independent.",
+          "type": "stat",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 6, "x": 18, "y": 32},
+          "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+          "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "value_and_name"},
+          "targets": [
+            {"refId": "A", "expr": "(sum by (launcher)(increase(zz_agent_job_duration_seconds_sum{type=\"github-converse\"}[$__range])) / sum by (launcher)(increase(zz_agent_job_duration_seconds_count{type=\"github-converse\"}[$__range]))) - (sum by (launcher)(increase(zz_agent_job_runtime_seconds_sum{type=\"github-converse\"}[$__range])) / sum by (launcher)(increase(zz_agent_job_runtime_seconds_count{type=\"github-converse\"}[$__range])))", "legendFormat": "{{launcher}}"}
           ]
         }
       ]
