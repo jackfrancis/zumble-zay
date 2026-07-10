@@ -27,6 +27,7 @@ import (
 	"github.com/jackfrancis/zumble-zay/internal/controlplane"
 	"github.com/jackfrancis/zumble-zay/internal/k8slauncher"
 	"github.com/jackfrancis/zumble-zay/internal/launcher"
+	"github.com/jackfrancis/zumble-zay/internal/metrics"
 	"github.com/jackfrancis/zumble-zay/internal/mint"
 	"github.com/jackfrancis/zumble-zay/internal/orchestrator"
 )
@@ -102,6 +103,29 @@ func main() {
 		}
 	}()
 
+	// Prometheus metrics on a DEDICATED listener, deliberately separate from the
+	// control API: that port is default-deny (docs/adr/0033) and must stay reachable
+	// only by the web tier, whereas /metrics is opened to the monitoring namespace by
+	// its own additive NetworkPolicy (deploy/k8s/monitoring/). Metrics must never be
+	// able to crash the orchestrator, so a bind failure is logged, not fatal.
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9090"
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", metrics.Handler())
+	metricsMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	metricsSrv := &http.Server{Addr: metricsAddr, Handler: metricsMux, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		log.Info("orchestrator metrics listening", "addr", metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("metrics server failed", "err", err)
+		}
+	}()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
@@ -109,6 +133,7 @@ func main() {
 	log.Info("shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	_ = metricsSrv.Shutdown(ctx)
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("graceful shutdown failed", "err", err)
 		os.Exit(1)

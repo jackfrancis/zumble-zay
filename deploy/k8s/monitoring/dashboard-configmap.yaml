@@ -1,0 +1,96 @@
+# A Grafana dashboard for agent-job / conversation timing, delivered as a
+# ConfigMap the kube-prometheus-stack Grafana sidecar auto-imports (it watches for
+# the grafana_dashboard label; `make metrics-up` sets searchNamespace=ALL so it is
+# found here in the zumble-zay namespace). A "conversation" is the github-converse
+# job, so the first panels filter zz_agent_job_duration_seconds to that type.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zumble-zay-conversations-dashboard
+  namespace: zumble-zay
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/name: zumble-zay
+data:
+  zumble-zay-conversations.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "graphTooltip": 1,
+      "schemaVersion": 39,
+      "tags": ["zumble-zay"],
+      "title": "Zumble-Zay — Agent Jobs & Conversations",
+      "uid": "zumble-zay-conversations",
+      "time": {"from": "now-3h", "to": "now"},
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "label": "Datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "refresh": 1,
+            "hide": 0,
+            "current": {}
+          }
+        ]
+      },
+      "panels": [
+        {
+          "title": "Conversation turn duration (github-converse)",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "histogram_quantile(0.50, sum(rate(zz_agent_job_duration_seconds_bucket{type=\"github-converse\"}[$__rate_interval])) by (le))", "legendFormat": "p50"},
+            {"refId": "B", "expr": "histogram_quantile(0.90, sum(rate(zz_agent_job_duration_seconds_bucket{type=\"github-converse\"}[$__rate_interval])) by (le))", "legendFormat": "p90"},
+            {"refId": "C", "expr": "histogram_quantile(0.99, sum(rate(zz_agent_job_duration_seconds_bucket{type=\"github-converse\"}[$__rate_interval])) by (le))", "legendFormat": "p99"}
+          ]
+        },
+        {
+          "title": "Conversation duration distribution",
+          "type": "heatmap",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "options": {"calculate": false, "cellGap": 1, "yAxis": {"unit": "s"}, "color": {"scheme": "Spectral", "mode": "scheme"}},
+          "targets": [
+            {"refId": "A", "expr": "sum(rate(zz_agent_job_duration_seconds_bucket{type=\"github-converse\"}[$__rate_interval])) by (le)", "format": "heatmap", "legendFormat": "{{le}}"}
+          ]
+        },
+        {
+          "title": "Avg conversation time (range)",
+          "type": "stat",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8},
+          "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+          "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+          "targets": [
+            {"refId": "A", "expr": "sum(rate(zz_agent_job_duration_seconds_sum{type=\"github-converse\"}[$__range])) / sum(rate(zz_agent_job_duration_seconds_count{type=\"github-converse\"}[$__range]))", "legendFormat": "avg"}
+          ]
+        },
+        {
+          "title": "Conversations completed (range)",
+          "type": "stat",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8},
+          "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+          "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+          "targets": [
+            {"refId": "A", "expr": "sum(increase(zz_agent_job_duration_seconds_count{type=\"github-converse\"}[$__range]))", "legendFormat": "completed"}
+          ]
+        },
+        {
+          "title": "p95 duration by job type (launcher comparison)",
+          "type": "timeseries",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 8}}, "overrides": []},
+          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["max", "mean"]}, "tooltip": {"mode": "multi"}},
+          "targets": [
+            {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(zz_agent_job_duration_seconds_bucket[$__rate_interval])) by (le, type))", "legendFormat": "{{type}}"}
+          ]
+        }
+      ]
+    }

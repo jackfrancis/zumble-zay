@@ -1,0 +1,28 @@
+# Scrape target for the orchestrator's Prometheus metrics — a SEPARATE Service
+# from the control-API Service (deploy/k8s/base/orchestrator-service.yaml) so the
+# monitoring wiring never touches the control plane's ClusterIP. The ServiceMonitor
+# selects this by the zumble-zay.dev/monitoring label. Applied by `make metrics-up`
+# (after kube-prometheus-stack installs the ServiceMonitor CRD).
+apiVersion: v1
+kind: Service
+metadata:
+  name: zumble-zay-orchestrator-metrics
+  namespace: zumble-zay
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: orchestrator
+    zumble-zay.dev/monitoring: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: orchestrator
+  ports:
+    - name: metrics
+      port: 9090
+      # By number, not the container port name, so this Service resolves against a
+      # running orchestrator (which always serves :9090) even if the Deployment's
+      # named metrics port hasn't been re-applied — activation needs only an image
+      # rebuild + rollout restart, no `kubectl apply` (which would revert imperative
+      # `LAUNCHER` env set by dev-up).
+      targetPort: 9090

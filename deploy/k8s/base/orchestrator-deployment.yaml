@@ -39,6 +39,12 @@ spec:
           ports:
             - name: control
               containerPort: 8090
+            # Prometheus metrics (docs/adr not required; observability). A separate
+            # port from `control` so scraping never crosses the default-deny control
+            # NetworkPolicy; opened to the monitoring namespace by an additive policy
+            # in deploy/k8s/monitoring/. Served by cmd/orchestrator (METRICS_ADDR).
+            - name: metrics
+              containerPort: 9090
           envFrom:
             # Shares the config (LAUNCHER, RUNTIME_*, AI_*, CONTROL_PLANE_AUDIENCE /
             # CONTROL_PLANE_CALLERS — the per-service caller identity it enforces,

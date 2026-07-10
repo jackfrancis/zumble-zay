@@ -4,7 +4,8 @@
         build-orchestrator image-orchestrator image-orchestrator-save kind-load-orchestrator vendor-primer \
         image-runtime-shell image-runtime-shell-save kind-load-runtime-shell opensandbox-install \
         image-runtime-a2a image-runtime-a2a-save kind-load-runtime-a2a kagent-install \
-        substrate-install substrate-cluster
+        substrate-install substrate-cluster \
+        metrics-up metrics-forward metrics-down
 
 BIN := bin/server
 
@@ -565,3 +566,41 @@ dev-logs:
 # Tail the orchestrator control-plane logs (docs/adr/0023).
 dev-logs-orchestrator:
 	kubectl -n $(KUBE_NS) logs -f deploy/zumble-zay-orchestrator
+
+# ---- Observability (Prometheus + Grafana) ---------------------------------
+# EXPERIMENTAL dev observability, orthogonal to the app deploy. metrics-up installs
+# kube-prometheus-stack (Prometheus + Grafana + Operator) into the monitoring
+# namespace and applies ZZ's scrape wiring (deploy/k8s/monitoring/): a metrics
+# Service, a ServiceMonitor, an ADDITIVE NetworkPolicy opening only the
+# orchestrator's :9090 metrics port to Prometheus (the control port stays
+# default-deny, docs/adr/0033), and a Grafana dashboard for conversation timing.
+# Requires helm + a running dev cluster (`make dev-up` first).
+MONITORING_NAMESPACE ?= monitoring
+# Optional chart pin; empty installs the latest.
+KUBE_PROMETHEUS_STACK_VERSION ?=
+
+metrics-up:
+	@command -v helm >/dev/null || { echo "helm required (https://helm.sh)"; exit 1; }
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	helm repo update
+	helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+		--namespace $(MONITORING_NAMESPACE) --create-namespace \
+		$(if $(KUBE_PROMETHEUS_STACK_VERSION),--version $(KUBE_PROMETHEUS_STACK_VERSION),) \
+		--set grafana.sidecar.dashboards.searchNamespace=ALL \
+		--set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+		--set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+		--wait --timeout 10m
+	kubectl apply -f deploy/k8s/monitoring/
+	@echo "monitoring installed. Visualize with:  make metrics-forward"
+
+# Port-forward Grafana to localhost:3000 (blocks); prints the generated admin password.
+metrics-forward:
+	@echo "Grafana -> http://localhost:3000  (user: admin)"
+	@printf 'password: '; kubectl -n $(MONITORING_NAMESPACE) get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
+	@echo "open the 'Zumble-Zay - Agent Jobs & Conversations' dashboard"
+	kubectl -n $(MONITORING_NAMESPACE) port-forward svc/kube-prometheus-stack-grafana 3000:80
+
+# Remove ZZ's scrape wiring and uninstall the stack.
+metrics-down:
+	-kubectl delete -f deploy/k8s/monitoring/
+	-helm uninstall kube-prometheus-stack --namespace $(MONITORING_NAMESPACE)

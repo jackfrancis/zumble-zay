@@ -1,0 +1,33 @@
+# Additive allow for Prometheus scraping. The base policy (deploy/k8s/base/
+# networkpolicy.yaml) default-denies ingress to the orchestrator and permits only
+# the web tier -> control port 8090. NetworkPolicies are additive (a union of
+# allows), so this second policy opens ONLY the metrics port (9090) to the
+# monitoring namespace — it does not touch the control-port isolation (docs/adr/0033).
+#
+# The monitoring namespace is matched by the automatic kubernetes.io/metadata.name
+# label kube-prometheus-stack's namespace carries. As with the base policy, this is
+# enforced in dev only when a NetworkPolicy-aware controller is present (the dev
+# cluster installs kube-network-policies); on kindnet it is inert but harmless.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zumble-zay-orchestrator-metrics
+  namespace: zumble-zay
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: orchestrator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: zumble-zay
+      app.kubernetes.io/component: orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090

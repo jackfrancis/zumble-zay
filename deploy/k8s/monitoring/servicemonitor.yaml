@@ -1,0 +1,24 @@
+# Tells the Prometheus Operator (kube-prometheus-stack) to scrape the orchestrator
+# metrics Service. `make metrics-up` installs Prometheus with
+# serviceMonitorSelectorNilUsesHelmValues=false, so it discovers this ServiceMonitor
+# in any namespace. This is a CRD (monitoring.coreos.com/v1) that exists only after
+# the stack is installed, so apply it after the helm release.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: zumble-zay-orchestrator
+  namespace: zumble-zay
+  labels:
+    app.kubernetes.io/name: zumble-zay
+    app.kubernetes.io/component: orchestrator
+spec:
+  namespaceSelector:
+    matchNames:
+      - zumble-zay
+  selector:
+    matchLabels:
+      zumble-zay.dev/monitoring: "true"
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s

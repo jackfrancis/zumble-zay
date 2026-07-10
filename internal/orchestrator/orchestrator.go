@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackfrancis/zumble-zay/internal/metrics"
 	"github.com/jackfrancis/zumble-zay/internal/mint"
 	"github.com/jackfrancis/zumble-zay/internal/principal"
 )
@@ -561,17 +562,26 @@ func (o *Orchestrator) finish(id, key string, handle Handle, err error) {
 	}
 	job.UpdatedAt = time.Now().UTC()
 	jobType, user := job.Type, job.ActingUserID
+	// Enqueue-to-terminal wall clock. For a github-converse job this is the total
+	// time of one conversation turn; the metric below is what Prometheus scrapes.
+	dur := job.UpdatedAt.Sub(job.CreatedAt)
 	delete(o.inflight, key)
 	o.mu.Unlock()
 
+	outcome := metrics.OutcomeSucceeded
+	if err != nil {
+		outcome = metrics.OutcomeFailed
+	}
+	metrics.ObserveJob(string(jobType), outcome, dur)
+
 	if err != nil {
 		if o.log != nil {
-			o.log.Error("agent job failed", "job", id, "user", user, "type", jobType, "err", err)
+			o.log.Error("agent job failed", "job", id, "user", user, "type", jobType, "duration", dur.String(), "err", err)
 		}
 		return
 	}
 	if o.log != nil {
-		o.log.Info("agent job succeeded", "job", id, "user", user, "type", jobType)
+		o.log.Info("agent job succeeded", "job", id, "user", user, "type", jobType, "duration", dur.String())
 	}
 
 	// Pipeline: each successful stage hands off to the next (ingest -> enrich ->
