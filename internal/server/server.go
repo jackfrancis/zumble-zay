@@ -81,6 +81,9 @@ func newWithDeps(cfg *config.Config, log *slog.Logger, cp controlplane.Client, v
 	// Hide an item from the landing page (docs/adr/0017). The handler checks the
 	// session itself and uses Post/Redirect/Get.
 	mux.Handle("POST /items/hide", http.HandlerFunc(webHandler.Hide))
+	// Batch "Review PRs" (docs/adr/0019): start a review conversation for every PR
+	// on the radar in one click. Session-checked in the handler; Post/Redirect/Get.
+	mux.Handle("POST /review-prs", http.HandlerFunc(webHandler.ReviewPRs))
 	// Per-item assistive conversation (docs/adr/0018, 0019): the thread page, the
 	// JSON turn endpoint the page posts to, and the poll endpoint it reads. A turn
 	// is answered asynchronously by a spawned converse runtime.

@@ -44,6 +44,10 @@ type Providers interface {
 type Pipeline interface {
 	EnsureBackfill(ctx context.Context, ownerID string) error
 	Active(ctx context.Context, ownerID string) (bool, error)
+	// Converse schedules one assistant turn for an item; the batch "Review PRs"
+	// action uses it to fan a review conversation out across the radar's PRs
+	// (docs/adr/0019). The same control-plane client backs all three.
+	Converse(ctx context.Context, ownerID, itemID string) error
 }
 
 // Handler renders the landing page and serves its static assets.
@@ -86,6 +90,7 @@ type pageData struct {
 	Items       []worklist.WorkItem
 	Item        worklist.WorkItem // the single item, for the thread view
 	ConvEnabled bool              // whether the assistive conversation is available
+	PRCount     int               // pull requests on the radar, for the "Review PRs" action
 	RefreshSecs int               // when > 0, the page auto-refreshes after this many seconds
 }
 
@@ -128,7 +133,13 @@ func (h *Handler) view(r *http.Request) (pageData, int) {
 	if active, aerr := h.pipeline.Active(r.Context(), user.ID); aerr == nil && active {
 		refresh = 3
 	}
-	return pageData{View: "worklist", User: user, Items: items, ConvEnabled: h.convEnabled, RefreshSecs: refresh}, http.StatusOK
+	prCount := 0
+	for i := range items {
+		if items[i].Type == worklist.TypePullRequest {
+			prCount++
+		}
+	}
+	return pageData{View: "worklist", User: user, Items: items, ConvEnabled: h.convEnabled, PRCount: prCount, RefreshSecs: refresh}, http.StatusOK
 }
 
 // Hide handles POST /items/hide. It marks the given item hidden for the signed-in
@@ -158,6 +169,44 @@ func (h *Handler) Hide(w http.ResponseWriter, r *http.Request) {
 			_ = h.store.Upsert(r.Context(), user.ID, it)
 			break
 		}
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// reviewPrompt is the seed user turn a batch review appends to each PR's thread.
+// For a capable model, "Can you review this PR?" plus the live PR context the
+// converse runtime already gathers is enough to guide a substantive review.
+const reviewPrompt = "Can you review this PR?"
+
+// ReviewPRs handles POST /review-prs. For the signed-in user it starts an
+// assistant review conversation for every pull request on the radar: it appends
+// a "Can you review this PR?" turn to each visible PR's thread and schedules a
+// converse runtime for it, then redirects back (Post/Redirect/Get). It is the
+// batch analog of a single Discuss turn (docs/adr/0019); the reviews run in
+// parallel, bounded by the orchestrator's worker pool — a deliberate scale
+// exercise. A hidden PR is skipped, and it is a no-op when the assistant is off.
+func (h *Handler) ReviewPRs(w http.ResponseWriter, r *http.Request) {
+	user := h.sessions.CurrentUser(r)
+	if user == nil || !h.convEnabled {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	items, err := h.store.List(r.Context(), user.ID)
+	if err != nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	for _, it := range items {
+		if it.Type != worklist.TypePullRequest || !it.Meta.HiddenAt.IsZero() {
+			continue
+		}
+		// Append the review request first, so the spawned runtime reads it from the
+		// stored thread; the message never rides the job's environment.
+		it.Thread = append(it.Thread, worklist.Message{Role: worklist.RoleUser, Content: reviewPrompt, At: h.now().UTC()})
+		if err := h.store.Upsert(r.Context(), user.ID, it); err != nil {
+			continue
+		}
+		_ = h.pipeline.Converse(r.Context(), user.ID, it.ID)
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

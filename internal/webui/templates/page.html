@@ -66,6 +66,11 @@
 
     {{else}}
       <p class="zz-count">{{len .Items}} item{{if ne (len .Items) 1}}s{{end}} on your radar</p>
+      {{if and .ConvEnabled (gt .PRCount 0)}}
+      <form class="zz-review-all" method="post" action="/review-prs" data-confirm="Start an AI review for all {{.PRCount}} pull request{{if ne .PRCount 1}}s{{end}}? This spawns a review conversation for each.">
+        <button class="btn btn-primary btn-sm" type="submit">&#128269; Review {{.PRCount}} PR{{if ne .PRCount 1}}s{{end}}</button>
+      </form>
+      {{end}}
       {{range .Items}}
         <div class="zz-item">
           <div class="zz-item-head">

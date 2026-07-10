@@ -19,6 +19,7 @@ func (f fakeSessions) CurrentUser(*http.Request) *session.User { return f.user }
 type fakePipeline struct {
 	active     bool
 	backfilled bool
+	conversed  []string
 }
 
 func (f *fakePipeline) EnsureBackfill(context.Context, string) error {
@@ -26,6 +27,10 @@ func (f *fakePipeline) EnsureBackfill(context.Context, string) error {
 	return nil
 }
 func (f *fakePipeline) Active(context.Context, string) (bool, error) { return f.active, nil }
+func (f *fakePipeline) Converse(_ context.Context, _, itemID string) error {
+	f.conversed = append(f.conversed, itemID)
+	return nil
+}
 
 type fakeProviders struct{}
 
@@ -67,6 +72,41 @@ func TestWorklistFlagsItemsWithDiscussion(t *testing.T) {
 	}
 	if n := strings.Count(body, ">Discuss<"); n != 1 {
 		t.Errorf("expected exactly one plain Discuss button, got %d", n)
+	}
+}
+
+func TestReviewPRsSeedsAndEnqueuesVisiblePRs(t *testing.T) {
+	user := &session.User{ID: "u1"}
+	store := worklist.NewMemoryStore()
+	store.Seed("u1",
+		worklist.WorkItem{ID: "pr1", OwnerID: "u1", Type: worklist.TypePullRequest, GitHub: worklist.GitHubRef{Number: 1}},
+		worklist.WorkItem{ID: "iss1", OwnerID: "u1", Type: worklist.TypeIssue, GitHub: worklist.GitHubRef{Number: 2}},
+		worklist.WorkItem{ID: "pr2", OwnerID: "u1", Type: worklist.TypePullRequest, GitHub: worklist.GitHubRef{Number: 3}, Meta: worklist.Metadata{HiddenAt: time.Now()}},
+	)
+	pipe := &fakePipeline{}
+	h := handlerFor(user, store, pipe)
+
+	rec := httptest.NewRecorder()
+	h.ReviewPRs(rec, httptest.NewRequest(http.MethodPost, "/review-prs", nil))
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rec.Code)
+	}
+	// Only the visible PR is reviewed: the issue and the hidden PR are skipped.
+	if len(pipe.conversed) != 1 || pipe.conversed[0] != "pr1" {
+		t.Fatalf("conversed = %v, want [pr1]", pipe.conversed)
+	}
+	items, _ := store.List(context.Background(), "u1")
+	for _, it := range items {
+		switch it.ID {
+		case "pr1":
+			if n := len(it.Thread); n != 1 || it.Thread[0].Role != worklist.RoleUser || it.Thread[0].Content != "Can you review this PR?" {
+				t.Fatalf("pr1 thread = %+v, want one user review turn", it.Thread)
+			}
+		case "iss1", "pr2":
+			if len(it.Thread) != 0 {
+				t.Fatalf("%s should not be seeded", it.ID)
+			}
+		}
 	}
 }
 
