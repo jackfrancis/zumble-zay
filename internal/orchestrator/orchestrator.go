@@ -227,9 +227,49 @@ type Orchestrator struct {
 	awaiters sync.WaitGroup // in-flight launch/await goroutines (docs/adr/0024)
 }
 
-// New starts an orchestrator with a small worker pool. A nil launcher uses
-// NoopLauncher. Call Stop to drain workers.
-func New(minter *mint.Minter, launcher Launcher, log *slog.Logger) *Orchestrator {
+// Option configures an Orchestrator at construction. Options are the tuning seam
+// for scale: WithWorkers/WithQueueDepth raise dispatch concurrency and the
+// enqueue buffer without a code change (docs/adr/0024).
+type Option func(*orchestratorConfig)
+
+type orchestratorConfig struct {
+	workers    int
+	queueDepth int
+}
+
+// WithWorkers overrides the number of dispatch workers (default defaultWorkers).
+// The pool bounds concurrent Dispatch calls (mint + substrate create), not the
+// number of jobs running at once — those await completion off the pool — so it
+// matters most for a slow-provisioning substrate or a large enqueue burst. A
+// non-positive n is ignored, keeping the default.
+func WithWorkers(n int) Option {
+	return func(c *orchestratorConfig) {
+		if n > 0 {
+			c.workers = n
+		}
+	}
+}
+
+// WithQueueDepth overrides the enqueue buffer (default queueDepth). The send is
+// non-blocking, so a full queue fails an enqueue rather than blocking the
+// request path; a larger buffer absorbs a bigger burst (e.g. a batch PR review).
+// A non-positive n is ignored, keeping the default.
+func WithQueueDepth(n int) Option {
+	return func(c *orchestratorConfig) {
+		if n > 0 {
+			c.queueDepth = n
+		}
+	}
+}
+
+// New starts an orchestrator with a pool of dispatch workers. A nil launcher
+// uses NoopLauncher. Call Stop to drain workers. Worker count and queue depth
+// default to defaultWorkers/queueDepth and are overridable with Options.
+func New(minter *mint.Minter, launcher Launcher, log *slog.Logger, opts ...Option) *Orchestrator {
+	cfg := orchestratorConfig{workers: defaultWorkers, queueDepth: queueDepth}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	if launcher == nil {
 		launcher = NoopLauncher{}
 	}
@@ -238,13 +278,13 @@ func New(minter *mint.Minter, launcher Launcher, log *slog.Logger) *Orchestrator
 		launcher:    launcher,
 		log:         log,
 		jobTTL:      defaultJobTTL,
-		queue:       make(chan string, queueDepth),
+		queue:       make(chan string, cfg.queueDepth),
 		jobs:        make(map[string]*Job),
 		inflight:    make(map[string]bool),
 		completions: make(map[string]chan error),
 		tickets:     make(map[string]pullTicket),
 	}
-	for i := 0; i < defaultWorkers; i++ {
+	for i := 0; i < cfg.workers; i++ {
 		o.wg.Add(1)
 		go o.reconcile()
 	}

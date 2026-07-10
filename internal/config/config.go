@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -65,6 +66,17 @@ type Config struct {
 	// token (re-read per request as the kubelet rotates it) to present as its
 	// control-API bearer (docs/adr/0031, 0034). Required for the remote control plane.
 	ControlPlaneTokenPath string
+	// OrchestratorWorkers overrides the orchestrator's dispatch-worker count
+	// (ORCHESTRATOR_WORKERS); 0 keeps the built-in default. The pool bounds
+	// concurrent dispatch (mint + substrate create), not the number of jobs running
+	// at once, so raising it helps a large enqueue burst (a batch PR review) or a
+	// slow-provisioning substrate — downstream limits (cluster capacity, provider
+	// rate limits) are the real ceiling.
+	OrchestratorWorkers int
+	// OrchestratorQueueDepth overrides the enqueue buffer (ORCHESTRATOR_QUEUE_DEPTH);
+	// 0 keeps the built-in default. A larger buffer absorbs a bigger burst before an
+	// enqueue fails (the send is non-blocking, so a full queue drops the job).
+	OrchestratorQueueDepth int
 }
 
 // AIConfig configures the AxisRanker's chat model. The endpoint speaks the
@@ -165,13 +177,15 @@ func Load() (*Config, error) {
 			TokenSecretName: lookupEnvOr("AI_TOKEN_SECRET_NAME", "zumble-zay-secrets"),
 			TokenSecretKey:  getEnv("AI_TOKEN_SECRET_KEY", "AI_TOKEN"),
 		},
-		MintPrivateKey:        mintPriv,
-		MintPublicKey:         mintPub,
-		ControlPlaneURL:       strings.TrimRight(getEnv("CONTROL_PLANE_URL", ""), "/"),
-		ControlPlaneAddr:      getEnv("CONTROL_PLANE_ADDR", ":8090"),
-		ControlPlaneAudience:  os.Getenv("CONTROL_PLANE_AUDIENCE"),
-		ControlPlaneCallers:   splitAndTrim(os.Getenv("CONTROL_PLANE_CALLERS")),
-		ControlPlaneTokenPath: os.Getenv("CONTROL_PLANE_TOKEN_PATH"),
+		MintPrivateKey:         mintPriv,
+		MintPublicKey:          mintPub,
+		ControlPlaneURL:        strings.TrimRight(getEnv("CONTROL_PLANE_URL", ""), "/"),
+		ControlPlaneAddr:       getEnv("CONTROL_PLANE_ADDR", ":8090"),
+		ControlPlaneAudience:   os.Getenv("CONTROL_PLANE_AUDIENCE"),
+		ControlPlaneCallers:    splitAndTrim(os.Getenv("CONTROL_PLANE_CALLERS")),
+		ControlPlaneTokenPath:  os.Getenv("CONTROL_PLANE_TOKEN_PATH"),
+		OrchestratorWorkers:    getEnvInt("ORCHESTRATOR_WORKERS", 0),
+		OrchestratorQueueDepth: getEnvInt("ORCHESTRATOR_QUEUE_DEPTH", 0),
 	}
 
 	return cfg, nil
@@ -210,6 +224,21 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvInt reads key as a base-10 int, returning fallback when it is unset,
+// empty, or unparseable — a typo degrades to the default rather than failing
+// startup.
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 // lookupEnvOr returns the value of key if it is present in the environment (even

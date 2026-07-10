@@ -65,7 +65,9 @@ func main() {
 	}
 
 	minter := mint.NewMinter(cfg.MintPrivateKey, 0)
-	orch := orchestrator.New(minter, agentLauncher, log)
+	orch := orchestrator.New(minter, agentLauncher, log,
+		orchestrator.WithWorkers(cfg.OrchestratorWorkers),
+		orchestrator.WithQueueDepth(cfg.OrchestratorQueueDepth))
 	defer orch.Stop()
 
 	mux := http.NewServeMux()

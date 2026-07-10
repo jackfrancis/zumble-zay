@@ -107,7 +107,9 @@ func buildControlClient(cfg *config.Config, log *slog.Logger) (controlplane.Clie
 	minter := mint.NewMinter(cfg.MintPrivateKey, 0)
 	launcher := agent.NewInProcessLauncher(loopbackBaseURL(cfg.Addr), &http.Client{Timeout: 30 * time.Second}, log).
 		WithAI(cfg.AI.Endpoint, cfg.AI.Model, cfg.AI.Token)
-	orch := orchestrator.New(minter, launcher, log)
+	orch := orchestrator.New(minter, launcher, log,
+		orchestrator.WithWorkers(cfg.OrchestratorWorkers),
+		orchestrator.WithQueueDepth(cfg.OrchestratorQueueDepth))
 	return controlplane.NewLocal(orch), orch.Stop, nil
 }
 
