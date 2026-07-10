@@ -99,3 +99,28 @@ func TestRetriesPostOnConnectionError(t *testing.T) {
 		t.Fatal("request body was not rewound for the retry")
 	}
 }
+
+// A 429 (rate limit) is retried even for a non-idempotent POST — the endpoint
+// refused the request, it was not processed — so the "review all PRs" fan-out
+// backs off instead of erroring the pod on a model-provider rate limit.
+func TestRetriesOn429(t *testing.T) {
+	var calls atomic.Int32
+	base := stubRoundTripper(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) <= 1 {
+			return okResp(http.StatusTooManyRequests), nil
+		}
+		return okResp(http.StatusOK), nil
+	})
+	c := httpretry.WrapN(&http.Client{Transport: base}, 3, time.Millisecond, 2*time.Millisecond)
+
+	resp, err := c.Post("http://api.githubcopilot.com/chat/completions", "application/json", strings.NewReader(`{"model":"x"}`))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after a 429 retry", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("attempts = %d, want 2 (1x 429 + 1 success)", got)
+	}
+}

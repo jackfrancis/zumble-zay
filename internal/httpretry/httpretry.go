@@ -6,8 +6,9 @@
 //
 // The retry scope is deliberately conservative to avoid duplicating a write: a
 // connection-phase failure (DNS or dial — the request never reached the server)
-// is retried for any method, while a mid-flight error or a 502/503/504 is retried
-// only for an idempotent method.
+// and a 429 (rate-limited — refused, not processed) are retried for any method,
+// while a mid-flight error or a 502/503/504 is retried only for an idempotent
+// method. A 429's Retry-After header is honored (capped) as the backoff.
 package httpretry
 
 import (
@@ -17,6 +18,8 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -26,6 +29,11 @@ const (
 	DefaultBaseBackoff = 200 * time.Millisecond
 	DefaultMaxBackoff  = 2 * time.Second
 )
+
+// maxRetryAfter caps how long a Retry-After header can make one request wait, so
+// a huge value cannot pin a goroutine (the request context bounds it too). A
+// rate-limited call within a job budget can afford this.
+const maxRetryAfter = 30 * time.Second
 
 // Wrap returns a copy of c whose transport retries transient connectivity
 // failures with the default policy. A nil client gets a fresh one; an
@@ -81,7 +89,7 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				return resp, err
 			}
 			req = rewound
-			if werr := backoffWait(req.Context(), t.baseBackoff, t.maxBackoff, attempt); werr != nil {
+			if werr := waitBeforeRetry(req.Context(), resp, t.baseBackoff, t.maxBackoff, attempt); werr != nil {
 				return nil, werr
 			}
 		}
@@ -121,15 +129,21 @@ func drain(resp *http.Response) {
 	_ = resp.Body.Close()
 }
 
-// backoffWait sleeps an exponentially growing, half-jittered delay before the
-// given (1-based) retry attempt, returning early if the context is cancelled.
-func backoffWait(ctx context.Context, base, max time.Duration, attempt int) error {
-	d := base << (attempt - 1)
-	if d <= 0 || d > max {
-		d = max
+// waitBeforeRetry blocks before a retry, returning early if the context is
+// cancelled. A rate-limited previous response (429) with a Retry-After header
+// uses that delay (capped by maxRetryAfter); otherwise it is an exponentially
+// growing, half-jittered backoff for the given (1-based) attempt.
+func waitBeforeRetry(ctx context.Context, prev *http.Response, base, max time.Duration, attempt int) error {
+	wait := jitteredBackoff(base, max, attempt)
+	if d, ok := retryAfter(prev); ok {
+		wait = d
+		if wait > maxRetryAfter {
+			wait = maxRetryAfter
+		}
 	}
-	half := d / 2
-	wait := half + time.Duration(rand.Int63n(int64(half)+1)) // full jitter in [d/2, d]
+	if wait <= 0 {
+		return nil
+	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
@@ -138,6 +152,44 @@ func backoffWait(ctx context.Context, base, max time.Duration, attempt int) erro
 	case <-timer.C:
 		return nil
 	}
+}
+
+// jitteredBackoff is an exponentially growing, half-jittered delay for the given
+// (1-based) attempt, capped at max.
+func jitteredBackoff(base, max time.Duration, attempt int) time.Duration {
+	d := base << (attempt - 1)
+	if d <= 0 || d > max {
+		d = max
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int63n(int64(half)+1)) // full jitter in [d/2, d]
+}
+
+// retryAfter parses a response's Retry-After header (an integer number of seconds
+// or an HTTP-date), returning the delay and whether it was present and
+// parseable. A past date or negative value yields a zero delay (retry now).
+func retryAfter(resp *http.Response) (time.Duration, bool) {
+	if resp == nil {
+		return 0, false
+	}
+	v := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if v == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			secs = 0
+		}
+		return time.Duration(secs) * time.Second, true
+	}
+	if when, err := http.ParseTime(v); err == nil {
+		d := time.Until(when)
+		if d < 0 {
+			d = 0
+		}
+		return d, true
+	}
+	return 0, false
 }
 
 // shouldRetry decides whether to repeat a request given its result. A request
@@ -151,7 +203,16 @@ func shouldRetry(method string, resp *http.Response, err error) bool {
 		}
 		return isIdempotent(method)
 	}
-	if resp != nil && isIdempotent(method) {
+	if resp == nil {
+		return false
+	}
+	// 429 = rate-limited: the request was refused, not processed, so retrying
+	// after a backoff is safe for any method (including a POST). This is the
+	// canonical back-off-and-retry case; Retry-After paces it.
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if isIdempotent(method) {
 		switch resp.StatusCode {
 		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			return true
